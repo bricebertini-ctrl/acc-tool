@@ -4,6 +4,7 @@ Croise courbes de charge producteur / consommateur(s) et calcule les taux d'ACC.
 Saisons tarifaires : Été = 1 avr – 31 oct | Hiver = 1 nov – 31 mars
 """
 
+import datetime
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -34,6 +35,7 @@ st.markdown("""
     .kpi-blue   { color: #2563eb; }
     .kpi-orange { color: #ea580c; }
     .kpi-red    { color: #dc2626; }
+    .kpi-purple { color: #7c3aed; }
     div[data-testid="stTabs"] button { font-size: 0.9rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -222,8 +224,13 @@ def align_series(series_dict: dict, producer_keys: list):
 
     resampled = {k: resample_series(v, target, steps[k]) for k, v in series_dict.items()}
 
-    start = max(s.index.min() for s in resampled.values())
-    end   = min(s.index.max() for s in resampled.values())
+    # La plage de référence est déterminée par les consommateurs (intersection).
+    # Les producteurs hors de cette plage contribuent 0 — pas de production = pas d'ACC,
+    # mais on ne pénalise pas la plage de calcul à cause d'un producteur plus court.
+    conso_series = [s for k, s in resampled.items() if k not in producer_keys]
+    ref_series   = conso_series if conso_series else list(resampled.values())
+    start = max(s.index.min() for s in ref_series)
+    end   = min(s.index.max() for s in ref_series)
     idx   = pd.date_range(start=start, end=end, freq=freq)
 
     aligned = {}
@@ -300,6 +307,123 @@ def compute_acc(aligned: dict, producer_keys: list, timestep: pd.Timedelta):
     ).set_index("Saison")
 
     return df, E, annual, monthly, seasonal
+
+
+# ── Tarification & économies ──────────────────────────────────────────────────
+
+def build_tariff_series(
+    idx: pd.DatetimeIndex,
+    option: str,
+    hc_start: datetime.time,
+    hc_end: datetime.time,
+    rates: dict,
+) -> pd.Series:
+    """
+    Retourne une série (€/kWh) du tarif fourniture pour chaque pas de temps,
+    selon l'option tarifaire (Monomial / HP-HC / HPH-HCH-HPE-HCE).
+    La plage HC peut enjamber minuit (ex. 22 h → 6 h).
+    """
+    # Rates en €/MWh → conversion €/kWh
+    r = {k: v / 1000.0 for k, v in rates.items()}
+
+    if option == "Monomial":
+        return pd.Series(r["mono"], index=idx, dtype=float)
+
+    hour_cont = idx.hour + idx.minute / 60.0
+    hs = hc_start.hour + hc_start.minute / 60.0
+    he = hc_end.hour   + hc_end.minute   / 60.0
+    is_hc = (hour_cont >= hs) | (hour_cont < he) if hs > he else (hour_cont >= hs) & (hour_cont < he)
+
+    if option == "HP / HC":
+        return pd.Series(np.where(is_hc, r["hc"], r["hp"]), index=idx, dtype=float)
+
+    # HPH · HCH · HPE · HCE
+    is_ete = (idx.month >= 4) & (idx.month <= 10)
+    tarif = np.select(
+        [is_hc & ~is_ete, ~is_hc & ~is_ete, is_hc & is_ete, ~is_hc & is_ete],
+        [r["hch"],        r["hph"],          r["hce"],       r["hpe"]],
+    )
+    return pd.Series(tarif, index=idx, dtype=float)
+
+
+def compute_economics(
+    df_flows: pd.DataFrame,
+    consumer_keys: list,
+    timestep: pd.Timedelta,
+    tariff_series: pd.Series,
+    cee: float,
+    gc: float,
+    accises_mwh: float,
+    tva: float,
+    prix_cession: float,
+):
+    """
+    Calcule les économies estimées par consommateur entrant en ACC,
+    avec décomposition par composante tarifaire.
+
+    Par pas de temps i :
+        eco_fourniture(i) = E_ACC(i) × tarif_fourniture(i)   [variable HP/HC]
+        eco_cee(i)        = E_ACC(i) × CEE/1000
+        eco_gc(i)         = E_ACC(i) × GC/1000
+        eco_accises(i)    = E_ACC(i) × Accises/1000
+        économie_HT(i)    = somme des 4 composantes
+        économie_TTC(i)   = économie_HT(i) × (1 + TVA/100)
+        coût_cession(i)   = E_ACC(i) × prix_cession/1000 × (1 + TVA/100)
+        économie_nette(i) = économie_TTC(i) − coût_cession(i)
+    """
+    dt_h         = timestep.total_seconds() / 3600
+    cee_kwh      = cee          / 1000.0
+    gc_kwh       = gc           / 1000.0
+    acc_kwh      = accises_mwh  / 1000.0
+    prix_ces_kwh = prix_cession / 1000.0
+    tva_mult     = 1.0 + tva / 100.0
+
+    annual_eco  = {}
+    eco_monthly = {}
+
+    for k in consumer_keys:
+        E_acc = df_flows[f"P_acc_{k}"] * dt_h          # kWh/pas
+
+        eco_fourniture = E_acc * tariff_series.values   # fourniture (HP/HC)
+        eco_cee        = E_acc * cee_kwh
+        eco_gc         = E_acc * gc_kwh
+        eco_accises    = E_acc * acc_kwh
+        eco_ht         = eco_fourniture + eco_cee + eco_gc + eco_accises
+        eco_ttc        = eco_ht * tva_mult
+        cost_cession   = E_acc * prix_ces_kwh * tva_mult
+        eco_nette      = eco_ttc - cost_cession
+
+        mi = E_acc.index.to_period("M")
+        monthly_k = pd.DataFrame({
+            "E_acc (kWh)":              E_acc.groupby(mi).sum(),
+            "Éco. fourniture HT (€)":   eco_fourniture.groupby(mi).sum(),
+            "Éco. CEE HT (€)":          eco_cee.groupby(mi).sum(),
+            "Éco. GC HT (€)":           eco_gc.groupby(mi).sum(),
+            "Éco. Accises HT (€)":      eco_accises.groupby(mi).sum(),
+            "Total éco. HT (€)":        eco_ht.groupby(mi).sum(),
+            "Total éco. TTC (€)":       eco_ttc.groupby(mi).sum(),
+            "Coût cession TTC (€)":     cost_cession.groupby(mi).sum(),
+            "Économie nette TTC (€)":   eco_nette.groupby(mi).sum(),
+        })
+        monthly_k.index = monthly_k.index.astype(str)
+        eco_monthly[k] = monthly_k
+
+        e_tot = E_acc.sum()
+        ht_tot = eco_ht.sum()
+        annual_eco[k] = {
+            "E_acc (kWh)":              round(e_tot),
+            "Éco. fourniture HT (€)":   round(eco_fourniture.sum(), 0),
+            "Éco. CEE HT (€)":          round(eco_cee.sum(), 0),
+            "Éco. GC HT (€)":           round(eco_gc.sum(), 0),
+            "Éco. Accises HT (€)":      round(eco_accises.sum(), 0),
+            "Total éco. HT (€)":        round(ht_tot, 0),
+            "Total éco. TTC (€)":       round(eco_ttc.sum(), 0),
+            "Coût cession TTC (€)":     round(cost_cession.sum(), 0),
+            "Économie nette TTC (€)":   round(eco_nette.sum(), 0),
+            "Gain net (€/MWh)":         round(eco_nette.sum() / e_tot * 1000, 1) if e_tot > 0 else 0.0,
+        }
+
+    return annual_eco, eco_monthly
 
 
 # ── Visualisations Plotly ─────────────────────────────────────────────────────
@@ -514,6 +638,73 @@ def chart_monthly_bars(monthly: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def chart_economics_monthly(eco_monthly: dict, consumer_keys: list) -> go.Figure:
+    """
+    Barres empilées par composante tarifaire (HT) + ligne économie nette TTC.
+    Si plusieurs consommateurs : barres groupées (total de chaque conso).
+    """
+    COMP_COLORS = {
+        "Éco. fourniture HT (€)": "#2563eb",
+        "Éco. CEE HT (€)":        "#7c3aed",
+        "Éco. GC HT (€)":         "#0891b2",
+        "Éco. Accises HT (€)":    "#ca8a04",
+    }
+    COMP_LABELS = {
+        "Éco. fourniture HT (€)": "Fourniture",
+        "Éco. CEE HT (€)":        "CEE",
+        "Éco. GC HT (€)":         "GC",
+        "Éco. Accises HT (€)":    "Accises",
+    }
+    NET_COLORS = ["#16a34a", "#ea580c", "#db2777", "#166534"]
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    if len(consumer_keys) == 1:
+        k      = consumer_keys[0]
+        df     = eco_monthly[k]
+        months = df.index.tolist()
+
+        for col, color in COMP_COLORS.items():
+            fig.add_trace(go.Bar(
+                x=months, y=df[col].round(0),
+                name=COMP_LABELS[col], marker_color=color, opacity=0.85,
+                hovertemplate=f"{COMP_LABELS[col]} : %{{y:,.0f}} €<extra></extra>",
+            ), secondary_y=False)
+
+        fig.add_trace(go.Scatter(
+            x=months, y=df["Économie nette TTC (€)"].round(0),
+            mode="lines+markers", name="Éco. nette TTC",
+            line=dict(color="#16a34a", width=2.5), marker=dict(size=6),
+            hovertemplate="Nette TTC : %{y:,.0f} €<extra></extra>",
+        ), secondary_y=False)
+
+    else:
+        # Multi-conso : barres groupées par consommateur (total HT)
+        for i, k in enumerate(consumer_keys):
+            df     = eco_monthly[k]
+            months = df.index.tolist()
+            color  = NET_COLORS[i % len(NET_COLORS)]
+            fig.add_trace(go.Bar(
+                x=months, y=df["Total éco. HT (€)"].round(0),
+                name=k, marker_color=color, opacity=0.85,
+                hovertemplate=f"{k} HT : %{{y:,.0f}} €<extra></extra>",
+            ), secondary_y=False)
+            fig.add_trace(go.Scatter(
+                x=months, y=df["Économie nette TTC (€)"].round(0),
+                mode="lines+markers", name=f"Nette TTC – {k}",
+                line=dict(color=color, width=2, dash="dot"), marker=dict(size=5),
+                hovertemplate="Nette TTC : %{y:,.0f} €<extra></extra>",
+            ), secondary_y=False)
+
+    fig.update_layout(
+        **LAYOUT_BASE, barmode="stack",
+        title_text="Décomposition mensuelle des économies HT + économie nette TTC",
+        height=440,
+    )
+    fig.update_yaxes(title_text="Économies (€)", secondary_y=False, gridcolor="#f1f5f9")
+    return fig
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -550,6 +741,80 @@ with st.sidebar:
         help="Les calculs sont toujours faits au pas natif. Seul l'affichage est agrégé.",
     )
     display_freq = display_options[display_label]
+
+    st.divider()
+    st.markdown("**3 · Paramètres tarifaires**")
+
+    tariff_option = st.radio(
+        "Structure tarifaire",
+        ["Monomial", "HP / HC", "HPH · HCH · HPE · HCE"],
+        help="Option tarifaire du contrat de fourniture du consommateur",
+    )
+
+    if tariff_option != "Monomial":
+        st.caption("Plages heures creuses (HC)")
+        _tc1, _tc2 = st.columns(2)
+        with _tc1:
+            hc_start = st.time_input("HC de", datetime.time(22, 0), step=1800)
+        with _tc2:
+            hc_end = st.time_input("HC à",  datetime.time(6,  0), step=1800)
+    else:
+        hc_start = datetime.time(22, 0)
+        hc_end   = datetime.time(6,  0)
+
+    st.caption("Tarif(s) de fourniture HT (€/MWh)")
+
+    if tariff_option == "Monomial":
+        _mono = st.number_input("Tarif fourniture HT (€/MWh)", min_value=0.0,
+                                value=120.0, step=0.5, format="%.2f")
+        tariff_rates = {"mono": _mono}
+
+    elif tariff_option == "HP / HC":
+        _t1, _t2 = st.columns(2)
+        with _t1:
+            _hp = st.number_input("HP (€/MWh)", min_value=0.0, value=145.0,
+                                  step=0.5, format="%.2f")
+        with _t2:
+            _hc = st.number_input("HC (€/MWh)", min_value=0.0, value=100.0,
+                                  step=0.5, format="%.2f")
+        tariff_rates = {"hp": _hp, "hc": _hc}
+
+    else:  # HPH · HCH · HPE · HCE
+        _t1, _t2 = st.columns(2)
+        with _t1:
+            _hph = st.number_input("HPH (€/MWh)", min_value=0.0, value=170.0,
+                                   step=0.5, format="%.2f")
+            _hpe = st.number_input("HPE (€/MWh)", min_value=0.0, value=130.0,
+                                   step=0.5, format="%.2f")
+        with _t2:
+            _hch = st.number_input("HCH (€/MWh)", min_value=0.0, value=120.0,
+                                   step=0.5, format="%.2f")
+            _hce = st.number_input("HCE (€/MWh)", min_value=0.0, value=90.0,
+                                   step=0.5, format="%.2f")
+        tariff_rates = {"hph": _hph, "hch": _hch, "hpe": _hpe, "hce": _hce}
+
+    st.caption("Taxes & contributions (hors TURPE) — €/MWh")
+    cee = st.number_input("CEE (€/MWh)", min_value=0.0, value=1.5,
+                          step=0.1, format="%.2f",
+                          help="Certificats d'économies d'énergie")
+    gc  = st.number_input("GC – Garanties de capacité (€/MWh)", min_value=0.0,
+                          value=3.0, step=0.1, format="%.2f")
+    accises_mwh = st.number_input(
+        "Accises sur l'électricité (€/MWh)", min_value=0.0, value=21.0,
+        step=0.5, format="%.2f",
+        help="Ancienne TICFE — 21 €/MWh taux standard entreprises",
+    )
+    tva = st.number_input("TVA (%)", min_value=0.0, max_value=100.0,
+                          value=20.0, step=0.5, format="%.1f")
+
+    st.divider()
+    st.markdown("**Prix de cession ACC**")
+    st.caption("Ce que le consommateur paye au producteur pour l'ACC")
+    prix_cession = st.number_input(
+        "Prix de cession HT (€/MWh)", min_value=0.0, value=70.0,
+        step=0.5, format="%.2f",
+        help="Laisser à 0 si non défini",
+    )
 
     st.divider()
     st.caption("💡 Les courbes peuvent avoir des pas de temps différents — elles seront automatiquement rééchantillonnées au pas le plus fin.")
@@ -591,15 +856,17 @@ with st.spinner("Chargement et traitement des courbes de charge…"):
         st.error(f"Erreur lors du calcul ACC : {e}")
         st.stop()
 
-consumer_keys = [k for k in aligned if k not in producer_keys]
+consumer_keys    = [k for k in aligned if k not in producer_keys]
+step_aligned_min = int(timestep.total_seconds() // 60)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_data, tab_curves, tab_acc, tab_synth = st.tabs([
+tab_data, tab_curves, tab_acc, tab_synth, tab_eco = st.tabs([
     "📋 Vérification données",
     "📈 Courbes croisées",
     "⚡ Flux ACC",
     "📊 Synthèse",
+    "💰 Économies",
 ])
 
 # ─── Tab 1 : Vérification données ────────────────────────────────────────────
@@ -653,7 +920,6 @@ with tab_data:
     else:
         st.success("Aucun trou détecté dans les données.", icon="✅")
 
-    step_aligned_min = int(timestep.total_seconds() // 60)
     plage = (
         f"{aligned[producer_keys[0]].index.min().strftime('%d/%m/%Y')} → "
         f"{aligned[producer_keys[0]].index.max().strftime('%d/%m/%Y')}"
@@ -840,3 +1106,159 @@ with tab_synth:
         style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
     ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
     st.dataframe(styled_monthly, use_container_width=True)
+
+# ─── Tab 5 : Économies ────────────────────────────────────────────────────────
+
+with tab_eco:
+    st.subheader("Estimation des économies – Rejoindre l'ACC")
+
+    # Description de l'option tarifaire choisie
+    if tariff_option == "Monomial":
+        _td = f"Tarif monomial : {tariff_rates['mono']:.4f} €/kWh"
+    elif tariff_option == "HP / HC":
+        _td = (f"HP : {tariff_rates['hp']:.4f} €/kWh  ·  HC : {tariff_rates['hc']:.4f} €/kWh  ·  "
+               f"HC {hc_start.strftime('%H:%M')} → {hc_end.strftime('%H:%M')}")
+    else:
+        _td = (f"HPH : {tariff_rates['hph']:.4f}  ·  HCH : {tariff_rates['hch']:.4f}  ·  "
+               f"HPE : {tariff_rates['hpe']:.4f}  ·  HCE : {tariff_rates['hce']:.4f} €/kWh  ·  "
+               f"HC {hc_start.strftime('%H:%M')} → {hc_end.strftime('%H:%M')}")
+
+    with st.expander("ℹ️ Méthode de calcul & hypothèses", expanded=False):
+        st.markdown(f"""
+**Option tarifaire :** {tariff_option} — {_td}
+
+**Taxes évitées (fixes) :** CEE {cee:.2f} €/MWh · GC {gc:.2f} €/MWh · Accises {accises_mwh:.2f} €/MWh = {(cee+gc+accises_mwh):.2f} €/MWh total taxes
+
+**TVA :** {tva:.1f}%  ·  **Prix de cession :** {prix_cession:.2f} €/MWh HT
+
+**Formule appliquée à chaque pas de temps :**
+- `Tarif évité(t)` = tarif fourniture(t) [selon HP/HC] + CEE + GC + Accises
+- `Économie HT(t)` = E_ACC(t) × Tarif évité(t)
+- `Économie TTC(t)` = Économie HT(t) × (1 + TVA/100)
+- `Coût cession TTC(t)` = E_ACC(t) × Prix cession × (1 + TVA/100)
+- `Économie nette(t)` = Économie TTC(t) − Coût cession TTC(t)
+
+⚠️ *Estimation indicative. Ne tient pas compte du TURPE ACC spécifique ni des ajustements contractuels.*
+        """)
+
+    try:
+        tariff_series = build_tariff_series(df_flows.index, tariff_option, hc_start, hc_end, tariff_rates)
+        annual_eco, eco_monthly = compute_economics(
+            df_flows, consumer_keys, timestep,
+            tariff_series, cee, gc, accises_mwh, tva, prix_cession,
+        )
+    except Exception as e:
+        st.error(f"Erreur lors du calcul économique : {e}")
+        st.stop()
+
+    # ── KPIs résumé ───────────────────────────────────────────────────────────
+    total_e_acc   = sum(v["E_acc (kWh)"]            for v in annual_eco.values())
+    total_ht      = sum(v["Total éco. HT (€)"]      for v in annual_eco.values())
+    total_ttc     = sum(v["Total éco. TTC (€)"]     for v in annual_eco.values())
+    total_cession = sum(v["Coût cession TTC (€)"]   for v in annual_eco.values())
+    total_nette   = sum(v["Économie nette TTC (€)"] for v in annual_eco.values())
+    gain_mwh      = total_nette / total_e_acc * 1000 if total_e_acc > 0 else 0.0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-blue">{total_e_acc:,.0f} kWh</div>
+            <div class="kpi-label">Énergie ACC totale</div>
+        </div>""", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-green">{total_ttc:,.0f} €</div>
+            <div class="kpi-label">Économie brute TTC<br>(coût évité)</div>
+        </div>""", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-orange">{total_cession:,.0f} €</div>
+            <div class="kpi-label">Coût cession TTC<br>(payé au producteur)</div>
+        </div>""", unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-purple">{total_nette:,.0f} €</div>
+            <div class="kpi-label">Économie nette TTC</div>
+        </div>""", unsafe_allow_html=True)
+    with c5:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-green">{gain_mwh:.1f} €/MWh</div>
+            <div class="kpi-label">Gain net moyen<br>par MWh ACC</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── Décomposition par composante (annuel) ────────────────────────────────
+    st.subheader("Décomposition annuelle des économies")
+
+    def _breakdown_table(eco: dict) -> pd.DataFrame:
+        ht_tot = eco["Total éco. HT (€)"]
+        rows = [
+            {"Composante": "Fourniture",
+             "Économie HT (€)": eco["Éco. fourniture HT (€)"],
+             "% du total HT": eco["Éco. fourniture HT (€)"] / ht_tot * 100 if ht_tot else 0},
+            {"Composante": "CEE",
+             "Économie HT (€)": eco["Éco. CEE HT (€)"],
+             "% du total HT": eco["Éco. CEE HT (€)"] / ht_tot * 100 if ht_tot else 0},
+            {"Composante": "GC – Garanties de capacité",
+             "Économie HT (€)": eco["Éco. GC HT (€)"],
+             "% du total HT": eco["Éco. GC HT (€)"] / ht_tot * 100 if ht_tot else 0},
+            {"Composante": "Accises",
+             "Économie HT (€)": eco["Éco. Accises HT (€)"],
+             "% du total HT": eco["Éco. Accises HT (€)"] / ht_tot * 100 if ht_tot else 0},
+            {"Composante": "**Total HT**",
+             "Économie HT (€)": ht_tot, "% du total HT": 100.0},
+            {"Composante": f"TVA ({tva:.0f}%)",
+             "Économie HT (€)": eco["Total éco. TTC (€)"] - ht_tot, "% du total HT": None},
+            {"Composante": "**Total TTC (coût évité)**",
+             "Économie HT (€)": eco["Total éco. TTC (€)"], "% du total HT": None},
+            {"Composante": "Coût cession TTC",
+             "Économie HT (€)": -eco["Coût cession TTC (€)"], "% du total HT": None},
+            {"Composante": "**Économie nette TTC**",
+             "Économie HT (€)": eco["Économie nette TTC (€)"], "% du total HT": None},
+        ]
+        df = pd.DataFrame(rows).set_index("Composante")
+        df.columns = ["Montant (€)", "% total HT"]
+        return df
+
+    if len(consumer_keys) == 1:
+        k = consumer_keys[0]
+        st.dataframe(
+            _breakdown_table(annual_eco[k]).style.format({
+                "Montant (€)": "{:,.0f}",
+                "% total HT":  lambda v: f"{v:.1f} %" if v is not None and not (isinstance(v, float) and np.isnan(v)) else "—",
+            }),
+            use_container_width=True,
+        )
+    else:
+        tabs_conso = st.tabs([k for k in consumer_keys])
+        for tab_k, k in zip(tabs_conso, consumer_keys):
+            with tab_k:
+                st.dataframe(
+                    _breakdown_table(annual_eco[k]).style.format({
+                        "Montant (€)": "{:,.0f}",
+                        "% total HT":  lambda v: f"{v:.1f} %" if v is not None and not (isinstance(v, float) and np.isnan(v)) else "—",
+                    }),
+                    use_container_width=True,
+                )
+
+    st.divider()
+
+    # ── Graphique mensuel ────────────────────────────────────────────────────
+    st.subheader("Économies mensuelles – décomposition par composante")
+    st.plotly_chart(chart_economics_monthly(eco_monthly, consumer_keys), use_container_width=True)
+
+    # ── Tableau mensuel détaillé ──────────────────────────────────────────────
+    st.divider()
+    _fmt_monthly = {c: "{:,.0f}" for c in eco_monthly[consumer_keys[0]].columns}
+
+    if len(consumer_keys) == 1:
+        st.caption("Tableau mensuel détaillé")
+        st.dataframe(eco_monthly[consumer_keys[0]].style.format(_fmt_monthly),
+                     use_container_width=True)
+    else:
+        st.subheader("Tableaux mensuels par consommateur")
+        for k in consumer_keys:
+            with st.expander(f"Tableau mensuel – {k}"):
+                st.dataframe(eco_monthly[k].style.format(_fmt_monthly),
+                             use_container_width=True)
