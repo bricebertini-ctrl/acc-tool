@@ -354,6 +354,7 @@ def compute_economics(
     cee: float,
     gc: float,
     accises_mwh: float,
+    autres_taxes_mwh: float,
     prix_cession: float,
 ):
     """
@@ -370,11 +371,12 @@ def compute_economics(
         achat_acc(i)      = E_ACC(i) × prix_cession/1000
         économie_nette(i) = économie_HT(i) − achat_acc(i)
     """
-    dt_h         = timestep.total_seconds() / 3600
-    cee_kwh      = cee          / 1000.0
-    gc_kwh       = gc           / 1000.0
-    acc_kwh      = accises_mwh  / 1000.0
-    prix_ces_kwh = prix_cession / 1000.0
+    dt_h          = timestep.total_seconds() / 3600
+    cee_kwh       = cee              / 1000.0
+    gc_kwh        = gc               / 1000.0
+    acc_kwh       = accises_mwh      / 1000.0
+    autres_kwh    = autres_taxes_mwh / 1000.0
+    prix_ces_kwh  = prix_cession     / 1000.0
 
     annual_eco  = {}
     eco_monthly = {}
@@ -386,7 +388,8 @@ def compute_economics(
         eco_cee        = E_acc * cee_kwh
         eco_gc         = E_acc * gc_kwh
         eco_accises    = E_acc * acc_kwh
-        eco_ht         = eco_fourniture + eco_cee + eco_gc + eco_accises
+        eco_autres     = E_acc * autres_kwh
+        eco_ht         = eco_fourniture + eco_cee + eco_gc + eco_accises + eco_autres
         achat_acc      = E_acc * prix_ces_kwh
         eco_nette      = eco_ht - achat_acc
 
@@ -397,6 +400,7 @@ def compute_economics(
             "dont CEE HT (€)":           eco_cee.groupby(mi).sum(),
             "dont GC HT (€)":            eco_gc.groupby(mi).sum(),
             "dont Accises HT (€)":       eco_accises.groupby(mi).sum(),
+            "dont Autres taxes HT (€)":  eco_autres.groupby(mi).sum(),
             "Coût sans ACC HT (€)":      eco_ht.groupby(mi).sum(),
             "Achat ACC HT (€)":          achat_acc.groupby(mi).sum(),
             "Économie grâce à l'ACC HT (€)": eco_nette.groupby(mi).sum(),
@@ -412,6 +416,7 @@ def compute_economics(
             "dont CEE HT (€)":               round(eco_cee.sum(), 0),
             "dont GC HT (€)":                round(eco_gc.sum(), 0),
             "dont Accises HT (€)":           round(eco_accises.sum(), 0),
+            "dont Autres taxes HT (€)":      round(eco_autres.sum(), 0),
             "Coût sans ACC HT (€)":          round(ht_tot, 0),
             "Achat ACC HT (€)":              round(achat_acc.sum(), 0),
             "Économie grâce à l'ACC HT (€)": round(eco_nette.sum(), 0),
@@ -639,16 +644,18 @@ def chart_economics_monthly(eco_monthly: dict, consumer_keys: list) -> go.Figure
     Si plusieurs consommateurs : barres groupées (total de chaque conso).
     """
     COMP_COLORS = {
-        "dont Fourniture HT (€)": "#2563eb",
-        "dont CEE HT (€)":        "#7c3aed",
-        "dont GC HT (€)":         "#0891b2",
-        "dont Accises HT (€)":    "#ca8a04",
+        "dont Fourniture HT (€)":   "#2563eb",
+        "dont CEE HT (€)":          "#7c3aed",
+        "dont GC HT (€)":           "#0891b2",
+        "dont Accises HT (€)":      "#ca8a04",
+        "dont Autres taxes HT (€)": "#64748b",
     }
     COMP_LABELS = {
-        "dont Fourniture HT (€)": "Fourniture",
-        "dont CEE HT (€)":        "CEE",
-        "dont GC HT (€)":         "GC",
-        "dont Accises HT (€)":    "Accises",
+        "dont Fourniture HT (€)":   "Fourniture",
+        "dont CEE HT (€)":          "CEE",
+        "dont GC HT (€)":           "GC",
+        "dont Accises HT (€)":      "Accises",
+        "dont Autres taxes HT (€)": "Autres taxes",
     }
     NET_COLORS = ["#16a34a", "#ea580c", "#db2777", "#166534"]
 
@@ -798,6 +805,11 @@ with st.sidebar:
         "Accises sur l'électricité (€/MWh)", min_value=0.0, value=21.0,
         step=0.5, format="%.2f",
         help="Ancienne TICFE — 21 €/MWh taux standard entreprises",
+    )
+    autres_taxes_mwh = st.number_input(
+        "Autres taxes / contributions (€/MWh)", min_value=0.0, value=0.0,
+        step=0.5, format="%.2f",
+        help="Ex. contribution énergie verte, taxe locale, etc. — laisser à 0 si aucune",
     )
 
     st.divider()
@@ -1141,7 +1153,7 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste 
         tariff_series = build_tariff_series(df_flows.index, tariff_option, hc_start, hc_end, tariff_rates)
         annual_eco, eco_monthly = compute_economics(
             df_flows, consumer_keys, timestep,
-            tariff_series, cee, gc, accises_mwh, prix_cession,
+            tariff_series, cee, gc, accises_mwh, autres_taxes_mwh, prix_cession,
         )
     except Exception as e:
         st.error(f"Erreur lors du calcul économique : {e}")
@@ -1194,8 +1206,9 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste 
             {"Ligne": "  dont Fourniture",      "Montant HT (€)": eco["dont Fourniture HT (€)"],  "% du coût classique": eco["dont Fourniture HT (€)"]  / sans * 100 if sans else 0},
             {"Ligne": "  dont CEE",             "Montant HT (€)": eco["dont CEE HT (€)"],         "% du coût classique": eco["dont CEE HT (€)"]         / sans * 100 if sans else 0},
             {"Ligne": "  dont GC",              "Montant HT (€)": eco["dont GC HT (€)"],          "% du coût classique": eco["dont GC HT (€)"]          / sans * 100 if sans else 0},
-            {"Ligne": "  dont Accises",         "Montant HT (€)": eco["dont Accises HT (€)"],     "% du coût classique": eco["dont Accises HT (€)"]     / sans * 100 if sans else 0},
-            {"Ligne": "  Total fournisseur classique", "Montant HT (€)": sans,                    "% du coût classique": 100.0},
+            {"Ligne": "  dont Accises",           "Montant HT (€)": eco["dont Accises HT (€)"],        "% du coût classique": eco["dont Accises HT (€)"]        / sans * 100 if sans else 0},
+            {"Ligne": "  dont Autres taxes",     "Montant HT (€)": eco["dont Autres taxes HT (€)"],   "% du coût classique": eco["dont Autres taxes HT (€)"]   / sans * 100 if sans else 0},
+            {"Ligne": "  Total fournisseur classique", "Montant HT (€)": sans,                        "% du coût classique": 100.0},
             {"Ligne": "Avec ACC : achat au producteur", "Montant HT (€)": eco["Achat ACC HT (€)"], "% du coût classique": eco["Achat ACC HT (€)"]       / sans * 100 if sans else 0},
             {"Ligne": "→ ÉCONOMIE GRÂCE À L'ACC",      "Montant HT (€)": eco["Économie grâce à l'ACC HT (€)"], "% du coût classique": eco["Économie grâce à l'ACC HT (€)"] / sans * 100 if sans else 0},
         ]
