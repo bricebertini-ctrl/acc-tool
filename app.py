@@ -1,0 +1,727 @@
+"""
+Outil de dimensionnement ACC – Autoconsommation Collective
+Croise courbes de charge producteur / consommateur(s) et calcule les taux d'ACC.
+Saisons tarifaires : Été = 1 avr – 31 oct | Hiver = 1 nov – 31 mars
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from io import StringIO
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ── Page config ───────────────────────────────────────────────────────────────
+
+st.set_page_config(
+    page_title="Outil ACC – Autoconsommation Collective",
+    layout="wide",
+    page_icon="⚡",
+)
+
+st.markdown("""
+<style>
+    .main-title { font-size: 1.6rem; font-weight: 700; color: #1e3a5f; margin-bottom: 0; }
+    .sub-title  { font-size: 0.95rem; color: #64748b; margin-top: 0; }
+    .kpi-box    { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+                  padding: 14px 18px; text-align: center; }
+    .kpi-value  { font-size: 1.6rem; font-weight: 700; }
+    .kpi-label  { font-size: 0.78rem; color: #64748b; margin-top: 2px; }
+    .kpi-green  { color: #16a34a; }
+    .kpi-blue   { color: #2563eb; }
+    .kpi-orange { color: #ea580c; }
+    .kpi-red    { color: #dc2626; }
+    div[data-testid="stTabs"] button { font-size: 0.9rem; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── Helpers – chargement CSV ──────────────────────────────────────────────────
+
+def _detect_delimiter(text: str) -> str:
+    first = text.split("\n")[0]
+    return ";" if first.count(";") >= first.count(",") else ","
+
+# Colonnes caractéristiques du format Enedis API (soutirage / injection)
+_ENEDIS_COLS = {"start_time", "end_time", "prm", "volume", "unit"}
+
+# Colonnes à ignorer lors de la détection générique (identifiants, codes…)
+_SKIP_COLS = {"prm", "pdl", "pce", "site_id", "meter_id", "id", "identifiant",
+              "provider", "model", "variant", "data_type", "unit"}
+
+
+@st.cache_data(show_spinner=False)
+def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
+    """
+    Charge un CSV et retourne (Series puissance en kW, métadonnées).
+
+    Formats supportés
+    -----------------
+    • Format Enedis API : colonnes start_time / volume / unit
+      – unit = kWh → P(kW) = volume / dt_heures
+      – unit = Wh  → P(kW) = volume / dt_heures / 1000
+    • Format générique : première colonne datetime + première colonne numérique
+      valide hors identifiants connus.
+      – Si colonne "unit" présente, même conversion que ci-dessus.
+      – Sinon, valeurs supposées en kW (puissance directe).
+    """
+    text = file_bytes.decode("utf-8", errors="replace")
+    delim = _detect_delimiter(text)
+
+    df = pd.read_csv(StringIO(text), sep=delim, skipinitialspace=True)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    meta = {"format": "générique", "unit_source": "kW", "conversion": "aucune"}
+
+    # ── Branche Enedis ────────────────────────────────────────────────────────
+    if _ENEDIS_COLS.issubset(set(df.columns)):
+        meta["format"] = "Enedis API"
+
+        # Datetime : start_time avec timezone mixte (CET +01 / CEST +02)
+        # → parse en UTC d'abord pour éviter l'erreur "mixed time zones"
+        # → convertit en Europe/Paris → supprime la tz (index naïf)
+        dt = pd.to_datetime(df["start_time"], utc=True).dt.tz_convert("Europe/Paris").dt.tz_localize(None)
+
+        values = pd.to_numeric(df["volume"], errors="coerce")
+        unit_raw = str(df["unit"].dropna().iloc[0]).strip().lower()
+        meta["unit_source"] = unit_raw
+
+        s = pd.Series(values.values, index=pd.DatetimeIndex(dt), name=filename)
+        s = s.sort_index().dropna().clip(lower=0)
+        # Supprime les doublons de timestamps (changement d'heure été→hiver)
+        s = s[~s.index.duplicated(keep="first")]
+
+        # Conversion énergie/intervalle → puissance moyenne kW
+        step = s.index.to_series().diff().dropna().mode().iloc[0]
+        dt_h = step.total_seconds() / 3600
+
+        # Dans cet export Enedis, le champ "volume" contient la puissance moyenne
+        # en kW sur l'intervalle — malgré le label "kWh" dans la colonne unit.
+        # Énergie par intervalle = valeur × dt_h  (ex. kW × 5/60 h = kWh)
+        # → aucune conversion nécessaire, les valeurs sont déjà en kW.
+        if unit_raw in ("wh", "w·h", "w.h"):
+            # Si vraiment des Wh/pas : Wh → kW = Wh / (dt_h × 1000)
+            s = s / dt_h / 1000
+            meta["conversion"] = f"Wh/{int(step.total_seconds()//60)} min → kW"
+        else:
+            # "kwh", "kw" ou autre : valeurs déjà en kW
+            meta["conversion"] = f"kW brut (label unit='{unit_raw}', énergie = valeur × {dt_h:.4f} h)"
+
+        return s, meta
+
+    # ── Branche générique ─────────────────────────────────────────────────────
+    # Détection colonne datetime
+    dt_col = None
+    for col in df.columns:
+        try:
+            parsed = pd.to_datetime(df[col], dayfirst=True, utc=True)
+            if parsed.notna().mean() > 0.8:
+                parsed = parsed.dt.tz_convert("Europe/Paris").dt.tz_localize(None)
+                df[col] = parsed
+                dt_col = col
+                break
+        except Exception:
+            continue
+    if dt_col is None:
+        raise ValueError(f"Colonne datetime introuvable dans « {filename} »")
+
+    # Détection colonne valeur (premier numérique hors identifiants connus)
+    val_col = None
+    for col in df.columns:
+        if col == dt_col or col in _SKIP_COLS:
+            continue
+        try:
+            if df[col].dtype == object:
+                v = pd.to_numeric(
+                    df[col].astype(str).str.replace(",", ".").str.replace(" ", ""),
+                    errors="coerce",
+                )
+            else:
+                v = pd.to_numeric(df[col], errors="coerce")
+            if v.notna().mean() > 0.5:
+                df[col] = v
+                val_col = col
+                break
+        except Exception:
+            continue
+    if val_col is None:
+        raise ValueError(f"Colonne valeur introuvable dans « {filename} »")
+
+    s = pd.Series(df[val_col].values, index=pd.DatetimeIndex(df[dt_col]), name=filename)
+    s = s.sort_index().dropna().clip(lower=0)
+    s = s[~s.index.duplicated(keep="first")]
+
+    # Conversion si colonne unit présente (même logique que branche Enedis)
+    if "unit" in df.columns:
+        unit_raw = str(df["unit"].dropna().iloc[0]).strip().lower()
+        meta["unit_source"] = unit_raw
+        step = s.index.to_series().diff().dropna().mode().iloc[0]
+        dt_h = step.total_seconds() / 3600
+        if unit_raw in ("wh", "w·h", "w.h"):
+            s = s / dt_h / 1000
+            meta["conversion"] = f"Wh → kW"
+        else:
+            meta["conversion"] = f"kW brut (label='{unit_raw}')"
+
+    return s, meta
+
+
+def detect_step(s: pd.Series) -> pd.Timedelta:
+    diffs = s.index.to_series().diff().dropna()
+    return diffs.mode().iloc[0]
+
+
+def resample_series(s: pd.Series, target: pd.Timedelta, source: pd.Timedelta) -> pd.Series:
+    """
+    Rééchantillonnage vers le pas cible.
+    • Upsampling (target < source) : forward-fill — puissance constante sur l'intervalle
+      → l'énergie est conservée : P × Δt reste identique.
+    • Downsampling (target > source) : moyenne — préserve la puissance moyenne.
+    """
+    freq = f"{int(target.total_seconds() // 60)}min"
+    if target <= source:
+        return s.resample(freq).ffill()
+    return s.resample(freq).mean()
+
+
+def align_series(series_dict: dict):
+    """Aligne toutes les séries sur le pas le plus fin et la plage commune."""
+    steps = {k: detect_step(v) for k, v in series_dict.items()}
+    target = min(steps.values())
+    freq = f"{int(target.total_seconds() // 60)}min"
+
+    aligned = {k: resample_series(v, target, steps[k]) for k, v in series_dict.items()}
+
+    start = max(s.index.min() for s in aligned.values())
+    end   = min(s.index.max() for s in aligned.values())
+    idx   = pd.date_range(start=start, end=end, freq=freq)
+
+    aligned = {k: s.reindex(idx).fillna(0).clip(lower=0) for k, s in aligned.items()}
+    return aligned, target, steps
+
+
+# ── Calcul ACC ────────────────────────────────────────────────────────────────
+
+def saison(month: int) -> str:
+    return "Été (avr–oct)" if 4 <= month <= 10 else "Hiver (nov–mars)"
+
+
+def compute_acc(aligned: dict, producer_key: str, timestep: pd.Timedelta):
+    """
+    Calcule les flux ACC et les indicateurs.
+    Allocation dynamique : chaque consommateur reçoit une part de l'ACC
+    proportionnelle à sa consommation instantanée.
+    """
+    dt_h = timestep.total_seconds() / 3600  # heures par pas
+    consumer_keys = [k for k in aligned if k != producer_key]
+
+    df = pd.DataFrame(aligned)
+    df["P_prod"]     = df[producer_key]
+    df["P_conso"]    = df[consumer_keys].sum(axis=1)
+    df["P_acc"]      = np.minimum(df["P_prod"], df["P_conso"])
+    df["P_surplus"]  = (df["P_prod"] - df["P_conso"]).clip(lower=0)
+    df["P_deficit"]  = (df["P_conso"] - df["P_prod"]).clip(lower=0)
+
+    # Allocation dynamique par consommateur
+    for k in consumer_keys:
+        mask = df["P_conso"] > 0
+        df[f"P_acc_{k}"] = 0.0
+        df.loc[mask, f"P_acc_{k}"] = (
+            df.loc[mask, "P_acc"] * df.loc[mask, k] / df.loc[mask, "P_conso"]
+        )
+
+    # ── Énergie ──────────────────────────────────────────────────────────────
+    E = (df[["P_prod", "P_conso", "P_acc", "P_surplus", "P_deficit"]] * dt_h).copy()
+    E.columns = ["E_prod", "E_conso", "E_acc", "E_surplus", "E_deficit"]
+    E["saison"] = E.index.month.map(saison)
+
+    def _row(mask=None):
+        sub = E if mask is None else E.loc[mask]
+        ep, ec, ea = sub["E_prod"].sum(), sub["E_conso"].sum(), sub["E_acc"].sum()
+        return {
+            "Prod (kWh)":            round(ep),
+            "Conso (kWh)":           round(ec),
+            "ACC (kWh)":             round(ea),
+            "Surplus réseau (kWh)":  round(sub["E_surplus"].sum()),
+            "Déficit réseau (kWh)":  round(sub["E_deficit"].sum()),
+            "Taux ACC prod (%)":     round(ea / ep * 100, 1) if ep > 0 else 0.0,
+            "Taux ACC conso (%)":    round(ea / ec * 100, 1) if ec > 0 else 0.0,
+        }
+
+    annual = _row()
+
+    months = E.index.to_period("M")
+    monthly = pd.DataFrame(
+        [dict(Mois=str(p), **_row(months == p)) for p in sorted(months.unique())]
+    ).set_index("Mois")
+
+    seasonal = pd.DataFrame(
+        [dict(Saison=s, **_row(E["saison"] == s)) for s in ["Été (avr–oct)", "Hiver (nov–mars)"]]
+    ).set_index("Saison")
+
+    return df, E, annual, monthly, seasonal
+
+
+# ── Visualisations Plotly ─────────────────────────────────────────────────────
+
+COLORS = {
+    "prod":    "#16a34a",
+    "conso":   "#2563eb",
+    "acc":     "rgba(34,197,94,0.35)",
+    "surplus": "rgba(234,179,8,0.40)",
+    "deficit": "rgba(239,68,68,0.35)",
+    "prod_line":    "#16a34a",
+    "conso_line":   "#2563eb",
+}
+
+LAYOUT_BASE = dict(
+    font=dict(family="Inter, sans-serif", size=12),
+    plot_bgcolor="#ffffff",
+    paper_bgcolor="#ffffff",
+    margin=dict(l=50, r=20, t=40, b=40),
+    hovermode="x unified",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+)
+
+
+def _add_rangebar(fig):
+    fig.update_xaxes(
+        rangeselector=dict(buttons=[
+            dict(count=1,  label="1 j",  step="day",   stepmode="backward"),
+            dict(count=7,  label="1 sem", step="day",  stepmode="backward"),
+            dict(count=1,  label="1 mois",step="month",stepmode="backward"),
+            dict(step="all", label="Tout"),
+        ]),
+        rangeslider=dict(visible=True, thickness=0.06),
+        type="date",
+    )
+
+
+def chart_raw_curves(series_dict: dict, steps: dict) -> go.Figure:
+    """Courbes brutes en sous-graphiques pour vérification."""
+    n = len(series_dict)
+    labels = list(series_dict.keys())
+    fig = make_subplots(
+        rows=n, cols=1, shared_xaxes=True,
+        subplot_titles=[f"{k}  ·  pas {int(steps[k].total_seconds()//60)} min" for k in labels],
+        vertical_spacing=0.08,
+    )
+    palette = [COLORS["prod"], COLORS["conso"], "#7c3aed", "#ea580c", "#0891b2"]
+    for i, k in enumerate(labels, 1):
+        s = series_dict[k]
+        fig.add_trace(
+            go.Scattergl(
+                x=s.index, y=s.values,
+                mode="lines",
+                line=dict(color=palette[i - 1], width=1),
+                name=k,
+                hovertemplate="%{y:.1f} kW<extra></extra>",
+            ),
+            row=i, col=1,
+        )
+        fig.update_yaxes(title_text="kW", row=i, col=1, gridcolor="#f1f5f9")
+    fig.update_layout(**LAYOUT_BASE, height=max(280 * n, 380), showlegend=False, title_text="Vérification des courbes de charge brutes")
+    _add_rangebar(fig)
+    return fig
+
+
+def chart_comparison(df: pd.DataFrame, display_freq: str) -> go.Figure:
+    """Production vs Consommation totale – superposition."""
+    agg = df[["P_prod", "P_conso"]].resample(display_freq).mean().dropna()
+    fig = go.Figure()
+    fig.add_trace(go.Scattergl(
+        x=agg.index, y=agg["P_prod"],
+        mode="lines", line=dict(color=COLORS["prod_line"], width=1.5),
+        name="Production", hovertemplate="%{y:.1f} kW<extra></extra>",
+    ))
+    fig.add_trace(go.Scattergl(
+        x=agg.index, y=agg["P_conso"],
+        mode="lines", line=dict(color=COLORS["conso_line"], width=1.5),
+        name="Consommation totale", hovertemplate="%{y:.1f} kW<extra></extra>",
+    ))
+    fig.update_yaxes(title_text="kW (moyenne)", gridcolor="#f1f5f9")
+    fig.update_layout(**LAYOUT_BASE, title_text="Production vs Consommation", height=420)
+    _add_rangebar(fig)
+    return fig
+
+
+def chart_acc_flows(df: pd.DataFrame, display_freq: str) -> go.Figure:
+    """
+    Visualisation des flux ACC.
+    Zone verte  = énergie autoconsommée (ACC)
+    Zone jaune  = surplus injecté réseau
+    Zone rouge  = déficit soutiré réseau
+    """
+    agg = df[["P_prod", "P_conso", "P_acc", "P_surplus", "P_deficit"]].resample(display_freq).mean().dropna()
+    t = agg.index
+
+    prod   = agg["P_prod"].values
+    conso  = agg["P_conso"].values
+    acc    = agg["P_acc"].values
+    surplus_upper = np.where(prod > conso, prod, conso)   # prod quand surplus, sinon conso (pas de remplissage)
+    deficit_upper = conso                                  # conso quand déficit
+    deficit_lower = np.where(conso > prod, prod, conso)   # prod quand déficit, sinon conso (pas de remplissage)
+
+    fig = go.Figure()
+
+    # ① ACC (vert, de 0 à min(prod, conso))
+    fig.add_trace(go.Scatter(
+        x=t, y=acc,
+        fill="tozeroy", fillcolor=COLORS["acc"],
+        line=dict(width=0), name="ACC (autoconsommé)",
+        hovertemplate="%{y:.1f} kW<extra></extra>",
+    ))
+
+    # ② Surplus (jaune, de conso à prod quand prod > conso)
+    fig.add_trace(go.Scatter(
+        x=t, y=conso,
+        fill=None, line=dict(width=0), showlegend=False,
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=t, y=surplus_upper,
+        fill="tonexty", fillcolor=COLORS["surplus"],
+        line=dict(width=0), name="Surplus → réseau",
+        hovertemplate="%{y:.1f} kW<extra></extra>",
+    ))
+
+    # ③ Déficit (rouge, de prod à conso quand conso > prod)
+    fig.add_trace(go.Scatter(
+        x=t, y=deficit_lower,
+        fill=None, line=dict(width=0), showlegend=False,
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=t, y=deficit_upper,
+        fill="tonexty", fillcolor=COLORS["deficit"],
+        line=dict(width=0), name="Déficit ← réseau",
+        hovertemplate="%{y:.1f} kW<extra></extra>",
+    ))
+
+    # ④ Lignes par-dessus
+    fig.add_trace(go.Scattergl(
+        x=t, y=prod,
+        mode="lines", line=dict(color=COLORS["prod_line"], width=1.5),
+        name="Production", hovertemplate="%{y:.1f} kW<extra></extra>",
+    ))
+    fig.add_trace(go.Scattergl(
+        x=t, y=conso,
+        mode="lines", line=dict(color=COLORS["conso_line"], width=1.5),
+        name="Consommation", hovertemplate="%{y:.1f} kW<extra></extra>",
+    ))
+
+    fig.update_yaxes(title_text="kW (moyenne)", gridcolor="#f1f5f9")
+    fig.update_layout(**LAYOUT_BASE, title_text="Flux ACC – Production / Consommation / Échanges réseau", height=450)
+    _add_rangebar(fig)
+    return fig
+
+
+def chart_monthly_bars(monthly: pd.DataFrame) -> go.Figure:
+    """Barres empilées mensuelles + ligne taux ACC."""
+    months = monthly.index.tolist()
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    fig.add_trace(go.Bar(
+        x=months, y=monthly["ACC (kWh)"],
+        name="ACC (kWh)", marker_color="#16a34a", opacity=0.85,
+    ), secondary_y=False)
+    fig.add_trace(go.Bar(
+        x=months, y=monthly["Surplus réseau (kWh)"],
+        name="Surplus réseau (kWh)", marker_color="#ca8a04", opacity=0.75,
+    ), secondary_y=False)
+    fig.add_trace(go.Bar(
+        x=months, y=monthly["Déficit réseau (kWh)"],
+        name="Déficit réseau (kWh)", marker_color="#dc2626", opacity=0.65,
+    ), secondary_y=False)
+
+    fig.add_trace(go.Scatter(
+        x=months, y=monthly["Taux ACC conso (%)"],
+        mode="lines+markers", name="Taux ACC conso (%)",
+        line=dict(color="#7c3aed", width=2.5, dash="dot"),
+        marker=dict(size=6),
+        hovertemplate="%{y:.1f}%<extra></extra>",
+    ), secondary_y=True)
+
+    fig.add_trace(go.Scatter(
+        x=months, y=monthly["Taux ACC prod (%)"],
+        mode="lines+markers", name="Taux ACC prod (%)",
+        line=dict(color="#0891b2", width=2, dash="dash"),
+        marker=dict(size=5),
+        hovertemplate="%{y:.1f}%<extra></extra>",
+    ), secondary_y=True)
+
+    fig.update_layout(
+        **LAYOUT_BASE, barmode="stack",
+        title_text="Bilan mensuel – Énergie & Taux d'ACC",
+        height=420,
+    )
+    fig.update_yaxes(title_text="Énergie (kWh)", secondary_y=False, gridcolor="#f1f5f9")
+    fig.update_yaxes(title_text="Taux ACC (%)", secondary_y=True, range=[0, 105], gridcolor=None)
+    return fig
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("### ⚡ Outil ACC")
+    st.caption("Autoconsommation collective – Dimensionnement énergétique")
+    st.divider()
+
+    st.markdown("**1 · Charger le producteur**")
+    prod_file = st.file_uploader("Courbe de charge producteur (.csv)", type="csv", key="prod")
+
+    st.markdown("**2 · Charger le(s) consommateur(s)**")
+    conso_files = st.file_uploader(
+        "Courbe(s) de charge consommateur(s) (.csv)",
+        type="csv", accept_multiple_files=True, key="conso",
+    )
+
+    st.divider()
+    st.markdown("**Résolution d'affichage**")
+    display_options = {
+        "5 min (brut)": "5min",
+        "15 min":       "15min",
+        "30 min":       "30min",
+        "1 heure":      "1h",
+        "4 heures":     "4h",
+        "1 jour":       "1D",
+    }
+    display_label = st.selectbox(
+        "Agrégation pour les graphiques",
+        list(display_options.keys()),
+        index=3,
+        help="Les calculs sont toujours faits au pas natif. Seul l'affichage est agrégé.",
+    )
+    display_freq = display_options[display_label]
+
+    st.divider()
+    st.caption("💡 Les courbes peuvent avoir des pas de temps différents — elles seront automatiquement rééchantillonnées au pas le plus fin.")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+st.markdown('<p class="main-title">Outil de dimensionnement ACC</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Autoconsommation collective · Taux d\'ACC annuel / mensuel / saisonnier</p>', unsafe_allow_html=True)
+
+if not prod_file or not conso_files:
+    st.info("Chargez au minimum **1 producteur** et **1 consommateur** dans la barre latérale pour commencer.", icon="📂")
+    st.stop()
+
+# ── Chargement ────────────────────────────────────────────────────────────────
+
+with st.spinner("Chargement et traitement des courbes de charge…"):
+    try:
+        raw = {}        # series (kW)
+        raw_meta = {}   # métadonnées de chargement
+        s, m = load_curve(prod_file.read(), prod_file.name)
+        raw[prod_file.name]      = s
+        raw_meta[prod_file.name] = m
+        for f in conso_files:
+            s, m = load_curve(f.read(), f.name)
+            raw[f.name]      = s
+            raw_meta[f.name] = m
+        producer_key = prod_file.name
+    except Exception as e:
+        st.error(f"Erreur lors du chargement : {e}")
+        st.stop()
+
+    try:
+        aligned, timestep, raw_steps = align_series(raw)
+        df_flows, df_energy, annual, monthly, seasonal = compute_acc(aligned, producer_key, timestep)
+    except Exception as e:
+        st.error(f"Erreur lors du calcul ACC : {e}")
+        st.stop()
+
+consumer_keys = [k for k in aligned if k != producer_key]
+
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+
+tab_data, tab_curves, tab_acc, tab_synth = st.tabs([
+    "📋 Vérification données",
+    "📈 Courbes croisées",
+    "⚡ Flux ACC",
+    "📊 Synthèse",
+])
+
+# ─── Tab 1 : Vérification données ────────────────────────────────────────────
+
+with tab_data:
+    st.subheader("Métadonnées des fichiers chargés")
+
+    meta_rows = []
+    for name, s in raw.items():
+        role = "Producteur" if name == producer_key else "Consommateur"
+        step_min = int(raw_steps[name].total_seconds() // 60)
+        m = raw_meta[name]
+        e_total = (s * raw_steps[name].total_seconds() / 3600).sum()
+        meta_rows.append({
+            "Fichier":              name,
+            "Rôle":                 role,
+            "Format détecté":       m.get("format", "—"),
+            "Unité source":         m.get("unit_source", "—"),
+            "Conversion appliquée": m.get("conversion", "—"),
+            "Pas de temps":         f"{step_min} min",
+            "Début":                s.index.min().strftime("%d/%m/%Y %H:%M"),
+            "Fin":                  s.index.max().strftime("%d/%m/%Y %H:%M"),
+            "Nb de points":         f"{len(s):,}".replace(",", "\u202f"),
+            "Min (kW)":             f"{s.min():.2f}",
+            "Max (kW)":             f"{s.max():.2f}",
+            "Moyenne (kW)":         f"{s.mean():.2f}",
+            "Total énergie (kWh)":  f"{e_total:,.0f}".replace(",", "\u202f"),
+        })
+
+    st.dataframe(pd.DataFrame(meta_rows).set_index("Fichier"), use_container_width=True)
+
+    step_aligned_min = int(timestep.total_seconds() // 60)
+    plage = (
+        f"{aligned[producer_key].index.min().strftime('%d/%m/%Y')} → "
+        f"{aligned[producer_key].index.max().strftime('%d/%m/%Y')}"
+    )
+    st.success(
+        f"Plage commune : **{plage}**  ·  "
+        f"Pas de calcul retenu : **{step_aligned_min} min**  ·  "
+        f"{len(df_flows):,} pas de temps".replace(",", "\u202f"),
+        icon="✅",
+    )
+
+    st.divider()
+    st.subheader("Courbes brutes (valeurs converties en kW)")
+    st.plotly_chart(chart_raw_curves(raw, raw_steps), use_container_width=True)
+
+# ─── Tab 2 : Courbes croisées ─────────────────────────────────────────────────
+
+with tab_curves:
+    st.subheader("Production vs Consommation totale")
+    st.caption(f"Affichage agrégé à : **{display_label}**  ·  Calculs effectués au pas natif ({step_aligned_min} min)")
+    st.plotly_chart(chart_comparison(df_flows, display_freq), use_container_width=True)
+
+    if len(consumer_keys) > 1:
+        st.divider()
+        st.subheader("Détail par consommateur")
+        fig_detail = go.Figure()
+        palette_conso = ["#2563eb", "#7c3aed", "#0891b2", "#ea580c", "#db2777"]
+        agg_detail = df_flows[consumer_keys].resample(display_freq).mean().dropna()
+        for i, k in enumerate(consumer_keys):
+            fig_detail.add_trace(go.Scattergl(
+                x=agg_detail.index, y=agg_detail[k],
+                mode="lines", line=dict(color=palette_conso[i % len(palette_conso)], width=1.5),
+                name=k, hovertemplate="%{y:.1f} kW<extra></extra>",
+            ))
+        fig_detail.update_yaxes(title_text="kW (moyenne)", gridcolor="#f1f5f9")
+        fig_detail.update_layout(**LAYOUT_BASE, title_text="Courbes consommateurs", height=380)
+        _add_rangebar(fig_detail)
+        st.plotly_chart(fig_detail, use_container_width=True)
+
+# ─── Tab 3 : Flux ACC ────────────────────────────────────────────────────────
+
+with tab_acc:
+    st.subheader("Analyse des flux d'autoconsommation")
+    st.caption(
+        "**Vert** = énergie autoconsommée (ACC)   |   "
+        "**Jaune** = surplus injecté au réseau   |   "
+        "**Rouge** = déficit soutiré au réseau"
+    )
+    st.plotly_chart(chart_acc_flows(df_flows, display_freq), use_container_width=True)
+
+    # KPIs rapides
+    st.divider()
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-green">{annual['Taux ACC prod (%)']:.1f} %</div>
+            <div class="kpi-label">Taux ACC producteur<br>(autoconsommation)</div>
+        </div>""", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-blue">{annual['Taux ACC conso (%)']:.1f} %</div>
+            <div class="kpi-label">Taux ACC consommateur<br>(autoproduction)</div>
+        </div>""", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-green">{annual['ACC (kWh)']:,.0f} kWh</div>
+            <div class="kpi-label">Énergie autoconsommée</div>
+        </div>""", unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-orange">{annual['Surplus réseau (kWh)']:,.0f} kWh</div>
+            <div class="kpi-label">Surplus injecté réseau</div>
+        </div>""", unsafe_allow_html=True)
+    with c5:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-red">{annual['Déficit réseau (kWh)']:,.0f} kWh</div>
+            <div class="kpi-label">Déficit soutiré réseau</div>
+        </div>""", unsafe_allow_html=True)
+
+# ─── Tab 4 : Synthèse ────────────────────────────────────────────────────────
+
+with tab_synth:
+    # ── Bilan annuel ──────────────────────────────────────────────────────────
+    st.subheader("Bilan annuel")
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        ann_df = pd.DataFrame({
+            "Indicateur": list(annual.keys()),
+            "Valeur":     [
+                f"{v:,.0f} kWh" if "kWh" in k else f"{v:.1f} %"
+                for k, v in annual.items()
+            ],
+        })
+        st.dataframe(ann_df, use_container_width=True, hide_index=True)
+    with col_b:
+        # Camembert des flux énergétiques
+        labels = ["ACC (autoconsommé)", "Surplus réseau", "Prod non valorisée (cohérence)"]
+        acc_val     = annual["ACC (kWh)"]
+        surplus_val = annual["Surplus réseau (kWh)"]
+        fig_pie = go.Figure(go.Pie(
+            labels=["ACC (autoconsommé)", "Surplus → réseau"],
+            values=[acc_val, surplus_val],
+            marker_colors=["#16a34a", "#ca8a04"],
+            hole=0.45,
+            textinfo="percent+label",
+            hovertemplate="%{label}: %{value:,.0f} kWh<extra></extra>",
+        ))
+        fig_pie.update_layout(
+            title_text="Destination de la production",
+            margin=dict(l=20, r=20, t=50, b=20),
+            height=280,
+            font=dict(family="Inter, sans-serif", size=12),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.divider()
+
+    # ── Bilan saisonnier ─────────────────────────────────────────────────────
+    st.subheader("Bilan saisonnier – Tarifaire Enedis")
+    st.caption("Été tarifaire : 1 avril – 31 octobre  ·  Hiver tarifaire : 1 novembre – 31 mars")
+
+    def style_pct(val):
+        if isinstance(val, (int, float)):
+            if val >= 70:
+                return "color: #16a34a; font-weight: 600"
+            elif val >= 40:
+                return "color: #ca8a04; font-weight: 600"
+            else:
+                return "color: #dc2626; font-weight: 600"
+        return ""
+
+    styled_seasonal = seasonal.style.applymap(
+        style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
+    ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
+    st.dataframe(styled_seasonal, use_container_width=True)
+
+    st.divider()
+
+    # ── Bilan mensuel graphique ───────────────────────────────────────────────
+    st.subheader("Bilan mensuel")
+    st.plotly_chart(chart_monthly_bars(monthly), use_container_width=True)
+
+    # ── Tableau mensuel détaillé ──────────────────────────────────────────────
+    st.caption("Tableau détaillé mensuel")
+    styled_monthly = monthly.style.applymap(
+        style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
+    ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
+    st.dataframe(styled_monthly, use_container_width=True)
