@@ -208,17 +208,18 @@ def saison(month: int) -> str:
     return "Été (avr–oct)" if 4 <= month <= 10 else "Hiver (nov–mars)"
 
 
-def compute_acc(aligned: dict, producer_key: str, timestep: pd.Timedelta):
+def compute_acc(aligned: dict, producer_keys: list, timestep: pd.Timedelta):
     """
     Calcule les flux ACC et les indicateurs.
+    Supporte plusieurs producteurs (la production est sommée).
     Allocation dynamique : chaque consommateur reçoit une part de l'ACC
     proportionnelle à sa consommation instantanée.
     """
     dt_h = timestep.total_seconds() / 3600  # heures par pas
-    consumer_keys = [k for k in aligned if k != producer_key]
+    consumer_keys = [k for k in aligned if k not in producer_keys]
 
     df = pd.DataFrame(aligned)
-    df["P_prod"]     = df[producer_key]
+    df["P_prod"]     = df[producer_keys].sum(axis=1)   # somme de tous les producteurs
     df["P_conso"]    = df[consumer_keys].sum(axis=1)
     df["P_acc"]      = np.minimum(df["P_prod"], df["P_conso"])
     df["P_surplus"]  = (df["P_prod"] - df["P_conso"]).clip(lower=0)
@@ -299,30 +300,43 @@ def _add_rangebar(fig):
     )
 
 
-def chart_raw_curves(series_dict: dict, steps: dict) -> go.Figure:
-    """Courbes brutes en sous-graphiques pour vérification."""
+def chart_raw_curves(series_dict: dict, steps: dict, producer_keys: list) -> go.Figure:
+    """Courbes brutes en sous-graphiques pour vérification. Producteurs en vert, consommateurs en bleu."""
     n = len(series_dict)
     labels = list(series_dict.keys())
+    palette_prod  = ["#16a34a", "#15803d", "#166534", "#4ade80", "#86efac"]
+    palette_conso = ["#2563eb", "#7c3aed", "#0891b2", "#ea580c", "#db2777"]
+    prod_idx  = 0
+    conso_idx = 0
+
     fig = make_subplots(
         rows=n, cols=1, shared_xaxes=True,
-        subplot_titles=[f"{k}  ·  pas {int(steps[k].total_seconds()//60)} min" for k in labels],
+        subplot_titles=[
+            f"{'[PROD] ' if k in producer_keys else '[CONSO] '}{k}  ·  pas {int(steps[k].total_seconds()//60)} min"
+            for k in labels
+        ],
         vertical_spacing=0.08,
     )
-    palette = [COLORS["prod"], COLORS["conso"], "#7c3aed", "#ea580c", "#0891b2"]
     for i, k in enumerate(labels, 1):
         s = series_dict[k]
+        if k in producer_keys:
+            color = palette_prod[prod_idx % len(palette_prod)]
+            prod_idx += 1
+        else:
+            color = palette_conso[conso_idx % len(palette_conso)]
+            conso_idx += 1
         fig.add_trace(
             go.Scattergl(
                 x=s.index, y=s.values,
                 mode="lines",
-                line=dict(color=palette[i - 1], width=1),
+                line=dict(color=color, width=1),
                 name=k,
                 hovertemplate="%{y:.1f} kW<extra></extra>",
             ),
             row=i, col=1,
         )
         fig.update_yaxes(title_text="kW", row=i, col=1, gridcolor="#f1f5f9")
-    fig.update_layout(**LAYOUT_BASE, height=max(280 * n, 380), showlegend=False, title_text="Vérification des courbes de charge brutes")
+    fig.update_layout(**LAYOUT_BASE, height=max(260 * n, 380), showlegend=False, title_text="Vérification des courbes de charge brutes")
     _add_rangebar(fig)
     return fig
 
@@ -470,8 +484,11 @@ with st.sidebar:
     st.caption("Autoconsommation collective – Dimensionnement énergétique")
     st.divider()
 
-    st.markdown("**1 · Charger le producteur**")
-    prod_file = st.file_uploader("Courbe de charge producteur (.csv)", type="csv", key="prod")
+    st.markdown("**1 · Charger le(s) producteur(s)**")
+    prod_files = st.file_uploader(
+        "Courbe(s) de charge producteur(s) (.csv)",
+        type="csv", accept_multiple_files=True, key="prod",
+    )
 
     st.markdown("**2 · Charger le(s) consommateur(s)**")
     conso_files = st.file_uploader(
@@ -506,7 +523,7 @@ with st.sidebar:
 st.markdown('<p class="main-title">Outil de dimensionnement ACC</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Autoconsommation collective · Taux d\'ACC annuel / mensuel / saisonnier</p>', unsafe_allow_html=True)
 
-if not prod_file or not conso_files:
+if not prod_files or not conso_files:
     st.info("Chargez au minimum **1 producteur** et **1 consommateur** dans la barre latérale pour commencer.", icon="📂")
     st.stop()
 
@@ -516,26 +533,28 @@ with st.spinner("Chargement et traitement des courbes de charge…"):
     try:
         raw = {}        # series (kW)
         raw_meta = {}   # métadonnées de chargement
-        s, m = load_curve(prod_file.read(), prod_file.name)
-        raw[prod_file.name]      = s
-        raw_meta[prod_file.name] = m
+        producer_keys = []
+        for f in prod_files:
+            s, m = load_curve(f.read(), f.name)
+            raw[f.name]      = s
+            raw_meta[f.name] = m
+            producer_keys.append(f.name)
         for f in conso_files:
             s, m = load_curve(f.read(), f.name)
             raw[f.name]      = s
             raw_meta[f.name] = m
-        producer_key = prod_file.name
     except Exception as e:
         st.error(f"Erreur lors du chargement : {e}")
         st.stop()
 
     try:
         aligned, timestep, raw_steps = align_series(raw)
-        df_flows, df_energy, annual, monthly, seasonal = compute_acc(aligned, producer_key, timestep)
+        df_flows, df_energy, annual, monthly, seasonal = compute_acc(aligned, producer_keys, timestep)
     except Exception as e:
         st.error(f"Erreur lors du calcul ACC : {e}")
         st.stop()
 
-consumer_keys = [k for k in aligned if k != producer_key]
+consumer_keys = [k for k in aligned if k not in producer_keys]
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
@@ -553,7 +572,7 @@ with tab_data:
 
     meta_rows = []
     for name, s in raw.items():
-        role = "Producteur" if name == producer_key else "Consommateur"
+        role = f"Producteur {producer_keys.index(name) + 1}" if name in producer_keys else "Consommateur"
         step_min = int(raw_steps[name].total_seconds() // 60)
         m = raw_meta[name]
         e_total = (s * raw_steps[name].total_seconds() / 3600).sum()
@@ -577,8 +596,8 @@ with tab_data:
 
     step_aligned_min = int(timestep.total_seconds() // 60)
     plage = (
-        f"{aligned[producer_key].index.min().strftime('%d/%m/%Y')} → "
-        f"{aligned[producer_key].index.max().strftime('%d/%m/%Y')}"
+        f"{aligned[producer_keys[0]].index.min().strftime('%d/%m/%Y')} → "
+        f"{aligned[producer_keys[0]].index.max().strftime('%d/%m/%Y')}"
     )
     st.success(
         f"Plage commune : **{plage}**  ·  "
@@ -589,7 +608,7 @@ with tab_data:
 
     st.divider()
     st.subheader("Courbes brutes (valeurs converties en kW)")
-    st.plotly_chart(chart_raw_curves(raw, raw_steps), use_container_width=True)
+    st.plotly_chart(chart_raw_curves(raw, raw_steps, producer_keys), use_container_width=True)
 
 # ─── Tab 2 : Courbes croisées ─────────────────────────────────────────────────
 
@@ -597,6 +616,23 @@ with tab_curves:
     st.subheader("Production vs Consommation totale")
     st.caption(f"Affichage agrégé à : **{display_label}**  ·  Calculs effectués au pas natif ({step_aligned_min} min)")
     st.plotly_chart(chart_comparison(df_flows, display_freq), use_container_width=True)
+
+    if len(producer_keys) > 1:
+        st.divider()
+        st.subheader("Détail par producteur")
+        fig_prod = go.Figure()
+        palette_prod = ["#16a34a", "#15803d", "#4ade80", "#86efac", "#166534"]
+        agg_prod = df_flows[producer_keys].resample(display_freq).mean().dropna()
+        for i, k in enumerate(producer_keys):
+            fig_prod.add_trace(go.Scattergl(
+                x=agg_prod.index, y=agg_prod[k],
+                mode="lines", line=dict(color=palette_prod[i % len(palette_prod)], width=1.5),
+                name=k, hovertemplate="%{y:.1f} kW<extra></extra>",
+            ))
+        fig_prod.update_yaxes(title_text="kW (moyenne)", gridcolor="#f1f5f9")
+        fig_prod.update_layout(**LAYOUT_BASE, title_text="Courbes producteurs individuels", height=380)
+        _add_rangebar(fig_prod)
+        st.plotly_chart(fig_prod, use_container_width=True)
 
     if len(consumer_keys) > 1:
         st.divider()
