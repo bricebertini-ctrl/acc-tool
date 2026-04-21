@@ -1131,15 +1131,66 @@ with tab_synth:
 with tab_eco:
     st.subheader("Estimation des économies – Rejoindre l'ACC")
 
+    # ── Sélecteur de période — EN PREMIER, filtre tout le calcul ─────────────
+    st.markdown("**Période d'analyse**")
+    st.caption(
+        "Toute l'analyse (croisement des courbes, volumes ACC, décomposition, projection) "
+        "est recalculée sur la période choisie ci-dessous."
+    )
+
+    _full_start  = df_flows.index.min()
+    _full_end    = df_flows.index.max()
+    _avail_years = sorted(df_flows.index.year.unique().tolist())
+
+    _period_opts = {}
+    _period_opts[
+        f"Plage complète  ({_full_start.strftime('%d/%m/%Y')} → {_full_end.strftime('%d/%m/%Y')})"
+    ] = (_full_start, _full_end)
+    for _yr in _avail_years:
+        _mask_yr   = df_flows.index.year == _yr
+        _yr_start  = df_flows.index[_mask_yr].min()
+        _yr_end    = df_flows.index[_mask_yr].max()
+        _n_days_yr = (_yr_end - _yr_start).days + 1
+        _lbl = str(_yr) if _n_days_yr >= 364 else f"{_yr}  ({_yr_start.strftime('%d/%m/%Y')} → {_yr_end.strftime('%d/%m/%Y')})"
+        _period_opts[_lbl] = (_yr_start, _yr_end)
+
+    _sel_lbl = st.selectbox(
+        "Année / période de référence",
+        list(_period_opts.keys()),
+        help="Sélectionner une année complète donne les résultats les plus représentatifs.",
+    )
+    _p_start, _p_end = _period_opts[_sel_lbl]
+    _n_days_period   = (_p_end - _p_start).days + 1
+
+    if _n_days_period < 180:
+        st.error(
+            f"La période sélectionnée ne couvre que **{_n_days_period} jours** "
+            f"({_p_start.strftime('%d/%m/%Y')} → {_p_end.strftime('%d/%m/%Y')}). "
+            "Un minimum de **6 mois de données** est requis pour une étude fiable.",
+            icon="⛔",
+        )
+        st.stop()
+
+    df_period = df_flows.loc[_p_start:_p_end]
+
+    st.info(
+        f"Analyse basée sur les courbes de charge réelles du "
+        f"**{_p_start.strftime('%d/%m/%Y')}** au **{_p_end.strftime('%d/%m/%Y')}** "
+        f"— {_n_days_period} jours · {_n_days_period/365.25:.2f} ans de données.",
+        icon="📅",
+    )
+
+    st.divider()
+
     # Description de l'option tarifaire choisie
     if tariff_option == "Monomial":
-        _td = f"Tarif monomial : {tariff_rates['mono']:.4f} €/kWh"
+        _td = f"Tarif monomial : {tariff_rates['mono']:.2f} €/MWh"
     elif tariff_option == "HP / HC":
-        _td = (f"HP : {tariff_rates['hp']:.4f} €/kWh  ·  HC : {tariff_rates['hc']:.4f} €/kWh  ·  "
+        _td = (f"HP : {tariff_rates['hp']:.2f} €/MWh  ·  HC : {tariff_rates['hc']:.2f} €/MWh  ·  "
                f"HC {hc_start.strftime('%H:%M')} → {hc_end.strftime('%H:%M')}")
     else:
-        _td = (f"HPH : {tariff_rates['hph']:.4f}  ·  HCH : {tariff_rates['hch']:.4f}  ·  "
-               f"HPE : {tariff_rates['hpe']:.4f}  ·  HCE : {tariff_rates['hce']:.4f} €/kWh  ·  "
+        _td = (f"HPH : {tariff_rates['hph']:.2f}  ·  HCH : {tariff_rates['hch']:.2f}  ·  "
+               f"HPE : {tariff_rates['hpe']:.2f}  ·  HCE : {tariff_rates['hce']:.2f} €/MWh  ·  "
                f"HC {hc_start.strftime('%H:%M')} → {hc_end.strftime('%H:%M')}")
 
     with st.expander("ℹ️ Méthode de calcul & hypothèses", expanded=False):
@@ -1152,9 +1203,9 @@ with tab_eco:
 
 **Formule appliquée à chaque pas de temps (tout en HT) :**
 
-Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste de la consommation (soutirage réseau) est hors périmètre — il reste facturé par le fournisseur classique.
+Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)** issus du croisement réel des courbes sur la période sélectionnée. Le reste de la consommation (soutirage réseau) est hors périmètre.
 
-- `Coût fournisseur classique(t)` = E_ACC(t) × [tarif fourniture(t) + CEE + GC + Accises]
+- `Coût fournisseur classique(t)` = E_ACC(t) × [tarif fourniture(t) + CEE + GC + Accises + Autres taxes]
 - `Achat ACC(t)` = E_ACC(t) × Prix achat ACC
 - `Économie grâce à l'ACC(t)` = Coût fournisseur classique(t) − Achat ACC(t)
 
@@ -1162,56 +1213,6 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste 
 
 ⚠️ *Estimation indicative. Ne tient pas compte du TURPE ACC spécifique ni des ajustements contractuels.*
         """)
-
-    # ── Sélecteur de période de référence ────────────────────────────────────
-    st.subheader("Période de référence")
-
-    _full_start = df_flows.index.min()
-    _full_end   = df_flows.index.max()
-    _avail_years = sorted(df_flows.index.year.unique().tolist())
-
-    _period_opts = {}
-    # Option plage complète
-    _period_opts[
-        f"Plage complète  ({_full_start.strftime('%d/%m/%Y')} → {_full_end.strftime('%d/%m/%Y')})"
-    ] = (_full_start, _full_end)
-    # Une option par année calendaire présente
-    for _yr in _avail_years:
-        _mask_yr  = df_flows.index.year == _yr
-        _yr_start = df_flows.index[_mask_yr].min()
-        _yr_end   = df_flows.index[_mask_yr].max()
-        _n_days_yr = (_yr_end - _yr_start).days + 1
-        if _n_days_yr >= 364:
-            _lbl = str(_yr)
-        else:
-            _lbl = f"{_yr}  ({_yr_start.strftime('%d/%m/%Y')} → {_yr_end.strftime('%d/%m/%Y')})"
-        _period_opts[_lbl] = (_yr_start, _yr_end)
-
-    _sel_lbl = st.selectbox(
-        "Année / période à utiliser comme base de calcul",
-        list(_period_opts.keys()),
-        help="Les économies annuelles et la projection sont calculées sur cette période.",
-    )
-    _p_start, _p_end = _period_opts[_sel_lbl]
-    _n_days_period   = (_p_end - _p_start).days + 1
-
-    # Prérequis : minimum 6 mois
-    if _n_days_period < 180:
-        st.error(
-            f"La période sélectionnée ne couvre que **{_n_days_period} jours** "
-            f"({_p_start.strftime('%d/%m/%Y')} → {_p_end.strftime('%d/%m/%Y')}). "
-            "Un minimum de **6 mois de données** est requis pour une étude fiable.",
-            icon="⛔",
-        )
-        st.stop()
-
-    df_period = df_flows.loc[_p_start:_p_end]
-    st.caption(
-        f"Période retenue : **{_p_start.strftime('%d/%m/%Y')} → {_p_end.strftime('%d/%m/%Y')}** "
-        f"({_n_days_period} jours · {_n_days_period/365.25:.2f} ans)"
-    )
-
-    st.divider()
 
     try:
         tariff_series = build_tariff_series(df_period.index, tariff_option, hc_start, hc_end, tariff_rates)
