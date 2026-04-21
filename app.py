@@ -1125,11 +1125,14 @@ with tab_eco:
 **Prix achat ACC :** {prix_cession:.2f} €/MWh HT
 
 **Formule appliquée à chaque pas de temps (tout en HT) :**
-- `Coût sans ACC(t)` = E_ACC(t) × [tarif fourniture(t) + CEE + GC + Accises]
-- `Achat ACC(t)` = E_ACC(t) × Prix achat ACC
-- `Économie grâce à l'ACC(t)` = Coût sans ACC(t) − Achat ACC(t)
 
-*La TVA est identique dans les deux cas — la comparaison est faite en HT.*
+Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste de la consommation (soutirage réseau) est hors périmètre — il reste facturé par le fournisseur classique.
+
+- `Coût fournisseur classique(t)` = E_ACC(t) × [tarif fourniture(t) + CEE + GC + Accises]
+- `Achat ACC(t)` = E_ACC(t) × Prix achat ACC
+- `Économie grâce à l'ACC(t)` = Coût fournisseur classique(t) − Achat ACC(t)
+
+*La TVA s'applique identiquement dans les deux cas — la comparaison est faite en HT.*
 
 ⚠️ *Estimation indicative. Ne tient pas compte du TURPE ACC spécifique ni des ajustements contractuels.*
         """)
@@ -1186,15 +1189,15 @@ with tab_eco:
     def _breakdown_table(eco: dict) -> pd.DataFrame:
         sans = eco["Coût sans ACC HT (€)"]
         rows = [
-            {"Ligne": "SANS ACC – Fourniture classique", "Montant HT (€)": None, "% du coût classique": None},
+            {"Ligne": "― Sur les volumes ACC uniquement ―",             "Montant HT (€)": None, "% du coût classique": None},
+            {"Ligne": "Sans ACC : coût chez fournisseur classique",     "Montant HT (€)": None, "% du coût classique": None},
             {"Ligne": "  dont Fourniture",      "Montant HT (€)": eco["dont Fourniture HT (€)"],  "% du coût classique": eco["dont Fourniture HT (€)"]  / sans * 100 if sans else 0},
             {"Ligne": "  dont CEE",             "Montant HT (€)": eco["dont CEE HT (€)"],         "% du coût classique": eco["dont CEE HT (€)"]         / sans * 100 if sans else 0},
             {"Ligne": "  dont GC",              "Montant HT (€)": eco["dont GC HT (€)"],          "% du coût classique": eco["dont GC HT (€)"]          / sans * 100 if sans else 0},
             {"Ligne": "  dont Accises",         "Montant HT (€)": eco["dont Accises HT (€)"],     "% du coût classique": eco["dont Accises HT (€)"]     / sans * 100 if sans else 0},
-            {"Ligne": "Total coût sans ACC",    "Montant HT (€)": sans,                           "% du coût classique": 100.0},
-            {"Ligne": "AVEC ACC",               "Montant HT (€)": None,                           "% du coût classique": None},
-            {"Ligne": "  Achat ACC (producteur)", "Montant HT (€)": eco["Achat ACC HT (€)"],      "% du coût classique": eco["Achat ACC HT (€)"]        / sans * 100 if sans else 0},
-            {"Ligne": "ÉCONOMIE GRÂCE À L'ACC", "Montant HT (€)": eco["Économie grâce à l'ACC HT (€)"], "% du coût classique": eco["Économie grâce à l'ACC HT (€)"] / sans * 100 if sans else 0},
+            {"Ligne": "  Total fournisseur classique", "Montant HT (€)": sans,                    "% du coût classique": 100.0},
+            {"Ligne": "Avec ACC : achat au producteur", "Montant HT (€)": eco["Achat ACC HT (€)"], "% du coût classique": eco["Achat ACC HT (€)"]       / sans * 100 if sans else 0},
+            {"Ligne": "→ ÉCONOMIE GRÂCE À L'ACC",      "Montant HT (€)": eco["Économie grâce à l'ACC HT (€)"], "% du coût classique": eco["Économie grâce à l'ACC HT (€)"] / sans * 100 if sans else 0},
         ]
         df = pd.DataFrame(rows).set_index("Ligne")
         return df
