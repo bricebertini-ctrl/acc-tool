@@ -186,20 +186,57 @@ def resample_series(s: pd.Series, target: pd.Timedelta, source: pd.Timedelta) ->
     return s.resample(freq).mean()
 
 
-def align_series(series_dict: dict):
-    """Aligne toutes les séries sur le pas le plus fin et la plage commune."""
+def _detect_gaps(s: pd.Series) -> dict:
+    """Détecte les trous (NaN consécutifs) dans une série après reindex."""
+    missing = s.isna()
+    n_missing = int(missing.sum())
+    if n_missing == 0:
+        return {"n_missing": 0, "pct": 0.0, "periods": []}
+    # Regroupe les NaN consécutifs
+    groups = (missing != missing.shift()).cumsum()
+    periods = []
+    for _, grp in missing.groupby(groups):
+        if grp.iloc[0]:
+            periods.append((grp.index[0], grp.index[-1]))
+    return {
+        "n_missing": n_missing,
+        "pct": n_missing / len(s) * 100,
+        "periods": periods[:5],   # on affiche max 5 périodes
+    }
+
+
+def align_series(series_dict: dict, producer_keys: list):
+    """
+    Aligne toutes les séries sur le pas le plus fin et la plage commune.
+
+    Remplissage des trous :
+    • Producteurs  → fillna(0)   — absence de données = pas de production
+    • Consommateurs → ffill (max 1 h) puis fillna(0)
+                     — trou = télérelève absente, on propage la dernière valeur connue
+    Retourne aussi un dict de métadonnées sur les trous détectés.
+    """
     steps = {k: detect_step(v) for k, v in series_dict.items()}
     target = min(steps.values())
     freq = f"{int(target.total_seconds() // 60)}min"
+    ffill_limit = max(1, int(pd.Timedelta("1h") / target))  # 1 h en nb de pas
 
-    aligned = {k: resample_series(v, target, steps[k]) for k, v in series_dict.items()}
+    resampled = {k: resample_series(v, target, steps[k]) for k, v in series_dict.items()}
 
-    start = max(s.index.min() for s in aligned.values())
-    end   = min(s.index.max() for s in aligned.values())
+    start = max(s.index.min() for s in resampled.values())
+    end   = min(s.index.max() for s in resampled.values())
     idx   = pd.date_range(start=start, end=end, freq=freq)
 
-    aligned = {k: s.reindex(idx).fillna(0).clip(lower=0) for k, s in aligned.items()}
-    return aligned, target, steps
+    aligned = {}
+    gaps    = {}
+    for k, s in resampled.items():
+        s_reindexed = s.reindex(idx)
+        gaps[k] = _detect_gaps(s_reindexed)
+        if k in producer_keys:
+            aligned[k] = s_reindexed.fillna(0).clip(lower=0)
+        else:
+            aligned[k] = s_reindexed.ffill(limit=ffill_limit).fillna(0).clip(lower=0)
+
+    return aligned, target, steps, gaps
 
 
 # ── Calcul ACC ────────────────────────────────────────────────────────────────
@@ -548,7 +585,7 @@ with st.spinner("Chargement et traitement des courbes de charge…"):
         st.stop()
 
     try:
-        aligned, timestep, raw_steps = align_series(raw)
+        aligned, timestep, raw_steps, gaps = align_series(raw, producer_keys)
         df_flows, df_energy, annual, monthly, seasonal = compute_acc(aligned, producer_keys, timestep)
     except Exception as e:
         st.error(f"Erreur lors du calcul ACC : {e}")
@@ -594,6 +631,28 @@ with tab_data:
 
     st.dataframe(pd.DataFrame(meta_rows).set_index("Fichier"), use_container_width=True)
 
+    # ── Avertissements trous ──────────────────────────────────────────────────
+    files_with_gaps = {k: v for k, v in gaps.items() if v["n_missing"] > 0}
+    if files_with_gaps:
+        st.warning(
+            f"{len(files_with_gaps)} fichier(s) contiennent des trous dans les données. "
+            "Voir le détail ci-dessous.",
+            icon="⚠️",
+        )
+        for name, g in files_with_gaps.items():
+            is_prod = name in producer_keys
+            strategie = "comblés à **0** (pas de production)" if is_prod else "comblés par **propagation** de la dernière valeur connue (max 1 h), puis 0"
+            with st.expander(f"{'[PROD]' if is_prod else '[CONSO]'} {name} — {g['n_missing']:,} points manquants ({g['pct']:.1f}%)".replace(",", "\u202f")):
+                st.caption(f"Stratégie : trous {strategie}")
+                if g["periods"]:
+                    rows_gap = [{"Début": s.strftime("%d/%m/%Y %H:%M"), "Fin": e.strftime("%d/%m/%Y %H:%M"),
+                                 "Durée": str(e - s)} for s, e in g["periods"]]
+                    st.dataframe(pd.DataFrame(rows_gap), use_container_width=True, hide_index=True)
+                    if len(g["periods"]) == 5:
+                        st.caption("(5 premières périodes affichées)")
+    else:
+        st.success("Aucun trou détecté dans les données.", icon="✅")
+
     step_aligned_min = int(timestep.total_seconds() // 60)
     plage = (
         f"{aligned[producer_keys[0]].index.min().strftime('%d/%m/%Y')} → "
@@ -609,6 +668,26 @@ with tab_data:
     st.divider()
     st.subheader("Courbes brutes (valeurs converties en kW)")
     st.plotly_chart(chart_raw_curves(raw, raw_steps, producer_keys), use_container_width=True)
+
+    # Légende stratégie de remplissage sous le graphe
+    st.markdown("**Stratégie de remplissage des trous appliquée :**")
+    cols = st.columns(len(raw))
+    for col, (name, s) in zip(cols, raw.items()):
+        is_prod = name in producer_keys
+        g = gaps[name]
+        role_label = f"🟢 {name}" if is_prod else f"🔵 {name}"
+        if g["n_missing"] == 0:
+            status = "✅ Aucun trou"
+            detail = "—"
+        else:
+            status = f"⚠️ {g['n_missing']:,} pts manquants ({g['pct']:.1f}%)".replace(",", "\u202f")
+            detail = "Rempli à **0**" if is_prod else "**Propagation** dernière valeur (max 1 h), puis 0"
+        with col:
+            st.markdown(f"""<div class="kpi-box">
+                <div style="font-size:0.78rem;font-weight:600;color:#475569">{role_label}</div>
+                <div style="font-size:0.82rem;margin-top:4px">{status}</div>
+                <div style="font-size:0.75rem;color:#64748b;margin-top:2px">{detail}</div>
+            </div>""", unsafe_allow_html=True)
 
 # ─── Tab 2 : Courbes croisées ─────────────────────────────────────────────────
 
