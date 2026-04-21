@@ -708,7 +708,7 @@ with tab_synth:
                 return "color: #dc2626; font-weight: 600"
         return ""
 
-    styled_seasonal = seasonal.style.applymap(
+    styled_seasonal = seasonal.style.map(
         style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
     ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
     st.dataframe(styled_seasonal, use_container_width=True)
@@ -721,7 +721,7 @@ with tab_synth:
 
     # ── Tableau mensuel détaillé ──────────────────────────────────────────────
     st.caption("Tableau détaillé mensuel")
-    styled_monthly = monthly.style.applymap(
+    styled_monthly = monthly.style.map(
         style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
     ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
     st.dataframe(styled_monthly, use_container_width=True)
