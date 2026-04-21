@@ -1163,10 +1163,60 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste 
 ⚠️ *Estimation indicative. Ne tient pas compte du TURPE ACC spécifique ni des ajustements contractuels.*
         """)
 
+    # ── Sélecteur de période de référence ────────────────────────────────────
+    st.subheader("Période de référence")
+
+    _full_start = df_flows.index.min()
+    _full_end   = df_flows.index.max()
+    _avail_years = sorted(df_flows.index.year.unique().tolist())
+
+    _period_opts = {}
+    # Option plage complète
+    _period_opts[
+        f"Plage complète  ({_full_start.strftime('%d/%m/%Y')} → {_full_end.strftime('%d/%m/%Y')})"
+    ] = (_full_start, _full_end)
+    # Une option par année calendaire présente
+    for _yr in _avail_years:
+        _mask_yr  = df_flows.index.year == _yr
+        _yr_start = df_flows.index[_mask_yr].min()
+        _yr_end   = df_flows.index[_mask_yr].max()
+        _n_days_yr = (_yr_end - _yr_start).days + 1
+        if _n_days_yr >= 364:
+            _lbl = str(_yr)
+        else:
+            _lbl = f"{_yr}  ({_yr_start.strftime('%d/%m/%Y')} → {_yr_end.strftime('%d/%m/%Y')})"
+        _period_opts[_lbl] = (_yr_start, _yr_end)
+
+    _sel_lbl = st.selectbox(
+        "Année / période à utiliser comme base de calcul",
+        list(_period_opts.keys()),
+        help="Les économies annuelles et la projection sont calculées sur cette période.",
+    )
+    _p_start, _p_end = _period_opts[_sel_lbl]
+    _n_days_period   = (_p_end - _p_start).days + 1
+
+    # Prérequis : minimum 6 mois
+    if _n_days_period < 180:
+        st.error(
+            f"La période sélectionnée ne couvre que **{_n_days_period} jours** "
+            f"({_p_start.strftime('%d/%m/%Y')} → {_p_end.strftime('%d/%m/%Y')}). "
+            "Un minimum de **6 mois de données** est requis pour une étude fiable.",
+            icon="⛔",
+        )
+        st.stop()
+
+    df_period = df_flows.loc[_p_start:_p_end]
+    st.caption(
+        f"Période retenue : **{_p_start.strftime('%d/%m/%Y')} → {_p_end.strftime('%d/%m/%Y')}** "
+        f"({_n_days_period} jours · {_n_days_period/365.25:.2f} ans)"
+    )
+
+    st.divider()
+
     try:
-        tariff_series = build_tariff_series(df_flows.index, tariff_option, hc_start, hc_end, tariff_rates)
+        tariff_series = build_tariff_series(df_period.index, tariff_option, hc_start, hc_end, tariff_rates)
         annual_eco, eco_monthly = compute_economics(
-            df_flows, consumer_keys, timestep,
+            df_period, consumer_keys, timestep,
             tariff_series, cee, gc, accises_mwh, autres_taxes_mwh, prix_cession,
         )
     except Exception as e:
@@ -1284,8 +1334,8 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste 
     st.divider()
     st.subheader(f"Projection sur {duree_contrat} an{'s' if duree_contrat > 1 else ''}")
 
-    # Annualisation : la courbe chargée ne couvre pas forcément exactement 1 an
-    n_days = (df_flows.index.max() - df_flows.index.min()).days + 1
+    # Annualisation sur la période retenue
+    n_days       = _n_days_period
     n_years_data = n_days / 365.25
     nette_annuelle = total_nette / n_years_data   # économie annualisée
 
