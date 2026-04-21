@@ -822,6 +822,20 @@ with st.sidebar:
     )
 
     st.divider()
+    st.divider()
+    st.markdown("**4 · Durée du contrat ACC**")
+    duree_contrat = st.number_input(
+        "Durée (années)", min_value=1, max_value=30, value=10, step=1,
+        help="Horizon de projection des économies",
+    )
+    hausse_annuelle = st.number_input(
+        "Hypothèse de hausse annuelle des prix (%)", min_value=0.0, max_value=20.0,
+        value=0.0, step=0.5, format="%.1f",
+        help="0 % = prix constants sur toute la durée. "
+             "Ex. 3 % = hausse tarifaire annuelle moyenne.",
+    )
+
+    st.divider()
     st.caption("💡 Les courbes peuvent avoir des pas de temps différents — elles seront automatiquement rééchantillonnées au pas le plus fin.")
 
 
@@ -1265,3 +1279,78 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)**. Le reste 
             with st.expander(f"Tableau mensuel – {k}"):
                 st.dataframe(eco_monthly[k].style.format(_fmt_monthly),
                              use_container_width=True)
+
+    # ── Projection sur la durée du contrat ────────────────────────────────────
+    st.divider()
+    st.subheader(f"Projection sur {duree_contrat} an{'s' if duree_contrat > 1 else ''}")
+
+    # Annualisation : la courbe chargée ne couvre pas forcément exactement 1 an
+    n_days = (df_flows.index.max() - df_flows.index.min()).days + 1
+    n_years_data = n_days / 365.25
+    nette_annuelle = total_nette / n_years_data   # économie annualisée
+
+    if hausse_annuelle > 0:
+        st.caption(
+            f"Base annuelle : **{nette_annuelle:,.0f} € HT/an** "
+            f"(annualisé sur {n_days} jours de données) · "
+            f"Hausse tarifaire appliquée : **{hausse_annuelle:.1f} %/an**"
+        )
+    else:
+        st.caption(
+            f"Base annuelle : **{nette_annuelle:,.0f} € HT/an** "
+            f"(annualisé sur {n_days} jours de données) · Prix supposés constants"
+        )
+
+    years       = list(range(1, int(duree_contrat) + 1))
+    eco_by_year = [nette_annuelle * (1 + hausse_annuelle / 100) ** (y - 1) for y in years]
+    cumul       = [sum(eco_by_year[:y]) for y in years]
+    total_proj  = cumul[-1]
+
+    # KPIs projection
+    cp1, cp2, cp3 = st.columns(3)
+    with cp1:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-green">{nette_annuelle:,.0f} €/an</div>
+            <div class="kpi-label">Économie annuelle HT<br>(année 1)</div>
+        </div>""", unsafe_allow_html=True)
+    with cp2:
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-purple">{total_proj:,.0f} €</div>
+            <div class="kpi-label">Économie totale HT<br>sur {duree_contrat} ans</div>
+        </div>""", unsafe_allow_html=True)
+    with cp3:
+        eco_last = eco_by_year[-1]
+        label_last = f"Économie année {duree_contrat}" if hausse_annuelle > 0 else "Prix constants"
+        st.markdown(f"""<div class="kpi-box">
+            <div class="kpi-value kpi-{'green' if hausse_annuelle > 0 else 'blue'}">{eco_last:,.0f} €/an</div>
+            <div class="kpi-label">{label_last}</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Graphique projection
+    fig_proj = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_proj.add_trace(go.Bar(
+        x=[f"An {y}" for y in years],
+        y=[round(v) for v in eco_by_year],
+        name="Économie annuelle HT (€)",
+        marker_color="#16a34a", opacity=0.85,
+        hovertemplate="An %{x} : %{y:,.0f} €<extra></extra>",
+    ), secondary_y=False)
+    fig_proj.add_trace(go.Scatter(
+        x=[f"An {y}" for y in years],
+        y=[round(v) for v in cumul],
+        mode="lines+markers",
+        name="Cumulatif (€)",
+        line=dict(color="#7c3aed", width=2.5),
+        marker=dict(size=6),
+        hovertemplate="Cumulatif : %{y:,.0f} €<extra></extra>",
+    ), secondary_y=True)
+    fig_proj.update_layout(
+        **LAYOUT_BASE,
+        title_text=f"Projection des économies sur {duree_contrat} ans",
+        height=380,
+    )
+    fig_proj.update_yaxes(title_text="Économie annuelle (€)", secondary_y=False, gridcolor="#f1f5f9")
+    fig_proj.update_yaxes(title_text="Cumulatif (€)", secondary_y=True, gridcolor=None)
+    st.plotly_chart(fig_proj, use_container_width=True)
