@@ -13,6 +13,12 @@ from plotly.subplots import make_subplots
 from io import StringIO
 import warnings
 
+try:
+    from pptx_export import generate_pptx as _generate_pptx
+    _PPTX_OK = True
+except Exception:
+    _PPTX_OK = False
+
 warnings.filterwarnings("ignore")
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -880,12 +886,13 @@ step_aligned_min = int(timestep.total_seconds() // 60)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_data, tab_curves, tab_acc, tab_synth, tab_eco = st.tabs([
+tab_data, tab_curves, tab_acc, tab_synth, tab_eco, tab_export = st.tabs([
     "📋 Vérification données",
     "📈 Courbes croisées",
     "⚡ Flux ACC",
     "📊 Synthèse",
     "💰 Économies",
+    "📄 Export PPTX",
 ])
 
 # ─── Tab 1 : Vérification données ────────────────────────────────────────────
@@ -1405,3 +1412,131 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)** issus du c
     fig_proj.update_yaxes(title_text="Économie annuelle (€)", secondary_y=False, gridcolor="#f1f5f9")
     fig_proj.update_yaxes(title_text="Cumulatif (€)", secondary_y=True, gridcolor=None)
     st.plotly_chart(fig_proj, use_container_width=True)
+
+# ─── Tab 6 : Export PPTX ─────────────────────────────────────────────────────
+
+with tab_export:
+    st.subheader("Générer la proposition commerciale (PowerPoint)")
+
+    if not _PPTX_OK:
+        st.error("Le module d'export PPTX n'est pas disponible. Vérifiez que python-pptx et matplotlib sont installés.", icon="⛔")
+        st.stop()
+
+    import os
+    _tpl_path = os.path.join(os.path.dirname(__file__), "template_acc.pptx")
+    if not os.path.exists(_tpl_path):
+        st.error("Fichier template_acc.pptx introuvable dans le dossier de l'application.", icon="⛔")
+        st.stop()
+
+    st.caption("Les graphiques et tableaux sont générés automatiquement à partir des courbes de charge chargées.")
+
+    # ── Informations du projet ────────────────────────────────────────────────
+    st.markdown("**Informations du projet**")
+    ex1, ex2, ex3 = st.columns(3)
+    with ex1:
+        exp_client   = st.text_input("Nom du client",       value="Nom du client")
+        exp_location = st.text_input("Localisation",        value="Commune, Département")
+    with ex2:
+        exp_project  = st.text_input("Type de centrale",    value="Centrale hydroélectrique")
+        exp_debut    = st.text_input("Début de l'opération", value="1 janvier 2026")
+    with ex3:
+        exp_validite = st.text_input("Offre valable jusqu'au", value="31/12/2025")
+
+    st.divider()
+
+    # ── Période à utiliser ────────────────────────────────────────────────────
+    st.markdown("**Période de référence pour le PPTX**")
+    _ex_full_start  = df_flows.index.min()
+    _ex_full_end    = df_flows.index.max()
+    _ex_avail_years = sorted(df_flows.index.year.unique().tolist())
+    _ex_opts = {
+        f"Plage complète  ({_ex_full_start.strftime('%d/%m/%Y')} → {_ex_full_end.strftime('%d/%m/%Y')})": (_ex_full_start, _ex_full_end)
+    }
+    for _yr in _ex_avail_years:
+        _m = df_flows.index.year == _yr
+        _ys, _ye = df_flows.index[_m].min(), df_flows.index[_m].max()
+        _nd = (_ye - _ys).days + 1
+        _lbl = str(_yr) if _nd >= 364 else f"{_yr}  ({_ys.strftime('%d/%m/%Y')} → {_ye.strftime('%d/%m/%Y')})"
+        _ex_opts[_lbl] = (_ys, _ye)
+
+    _ex_sel = st.selectbox("Période", list(_ex_opts.keys()), key="pptx_period")
+    _ex_ps, _ex_pe = _ex_opts[_ex_sel]
+    _ex_ndays = (_ex_pe - _ex_ps).days + 1
+
+    if _ex_ndays < 180:
+        st.error(f"Période trop courte ({_ex_ndays} jours). Minimum 6 mois requis.", icon="⛔")
+        st.stop()
+
+    st.caption(f"Données : **{_ex_ps.strftime('%d/%m/%Y')} → {_ex_pe.strftime('%d/%m/%Y')}** ({_ex_ndays} jours)")
+
+    st.divider()
+
+    # ── Bouton de génération ──────────────────────────────────────────────────
+    if st.button("🖨️ Générer le PowerPoint", type="primary"):
+        with st.spinner("Génération en cours…"):
+            try:
+                # Recalcul ACC sur la période sélectionnée
+                _ex_df   = df_flows.loc[_ex_ps:_ex_pe]
+                _ex_E    = (_ex_df[["P_prod", "P_conso", "P_acc", "P_surplus", "P_deficit"]] * (timestep.total_seconds() / 3600)).copy()
+                _ex_E.columns = ["E_prod", "E_conso", "E_acc", "E_surplus", "E_deficit"]
+                _ex_E["saison"] = _ex_E.index.month.map(saison)
+
+                def _row(mask=None):
+                    sub = _ex_E if mask is None else _ex_E.loc[mask]
+                    ep, ec, ea = sub["E_prod"].sum(), sub["E_conso"].sum(), sub["E_acc"].sum()
+                    return {
+                        "Prod (kWh)":           round(ep),
+                        "Conso (kWh)":          round(ec),
+                        "ACC (kWh)":            round(ea),
+                        "Surplus réseau (kWh)": round(sub["E_surplus"].sum()),
+                        "Déficit réseau (kWh)": round(sub["E_deficit"].sum()),
+                        "Taux ACC prod (%)":    round(ea / ep * 100, 1) if ep > 0 else 0.0,
+                        "Taux ACC conso (%)":   round(ea / ec * 100, 1) if ec > 0 else 0.0,
+                    }
+
+                _ex_annual = _row()
+                _ex_months = _ex_E.index.to_period("M")
+                _ex_monthly = pd.DataFrame(
+                    [dict(Mois=str(p), **_row(_ex_months == p)) for p in sorted(_ex_months.unique())]
+                ).set_index("Mois")
+                _ex_seasonal = pd.DataFrame(
+                    [dict(Saison=s, **_row(_ex_E["saison"] == s)) for s in ["Été (avr–oct)", "Hiver (nov–mars)"]]
+                ).set_index("Saison")
+
+                # Économies sur la période
+                _ex_tariff = build_tariff_series(_ex_df.index, tariff_option, hc_start, hc_end, tariff_rates)
+                _ex_annual_eco, _ = compute_economics(
+                    _ex_df, consumer_keys, timestep,
+                    _ex_tariff, cee, gc, accises_mwh, autres_taxes_mwh, prix_cession,
+                )
+
+                pptx_bytes = _generate_pptx(
+                    template_path  = _tpl_path,
+                    client_name    = exp_client,
+                    location       = exp_location,
+                    project_type   = exp_project,
+                    date_debut     = exp_debut,
+                    date_validite  = exp_validite,
+                    annual         = _ex_annual,
+                    monthly        = _ex_monthly,
+                    seasonal       = _ex_seasonal,
+                    annual_eco     = _ex_annual_eco,
+                    consumer_keys  = consumer_keys,
+                    tariff_option  = tariff_option,
+                    tariff_rates   = tariff_rates,
+                    prix_cession   = prix_cession,
+                    duree_contrat  = int(duree_contrat),
+                    p_start        = _ex_ps,
+                    p_end          = _ex_pe,
+                )
+
+                fname = f"Proposition_ACC_{exp_client.replace(' ', '_')}.pptx"
+                st.download_button(
+                    label    = "⬇️ Télécharger le PPTX",
+                    data     = pptx_bytes,
+                    file_name= fname,
+                    mime     = "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+                st.success("PowerPoint généré ! Cliquez sur le bouton ci-dessus pour le télécharger.", icon="✅")
+            except Exception as e:
+                st.error(f"Erreur lors de la génération : {e}", icon="⛔")
