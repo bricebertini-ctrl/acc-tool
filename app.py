@@ -442,12 +442,22 @@ COLORS = {
 }
 
 LAYOUT_BASE = dict(
-    font=dict(family="Inter, sans-serif", size=12),
+    font=dict(family="Inter, sans-serif", size=12, color="#1e293b"),
     plot_bgcolor="#ffffff",
     paper_bgcolor="#ffffff",
-    margin=dict(l=50, r=20, t=40, b=40),
+    margin=dict(l=50, r=20, t=50, b=80),
     hovermode="x unified",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    legend=dict(
+        orientation="h",
+        yanchor="top",
+        y=-0.18,
+        xanchor="center",
+        x=0.5,
+        bgcolor="rgba(255,255,255,0.95)",
+        bordercolor="#cbd5e1",
+        borderwidth=1,
+        font=dict(size=11, color="#1e293b"),
+    ),
 )
 
 
@@ -520,7 +530,7 @@ def chart_comparison(df: pd.DataFrame, display_freq: str) -> go.Figure:
         name="Consommation totale", hovertemplate="%{y:.1f} kW<extra></extra>",
     ))
     fig.update_yaxes(title_text="kW (moyenne)", gridcolor="#f1f5f9")
-    fig.update_layout(**LAYOUT_BASE, title_text="Production vs Consommation", height=420)
+    fig.update_layout(**LAYOUT_BASE, title_text="Production vs Consommation", height=450)
     _add_rangebar(fig)
     return fig
 
@@ -591,7 +601,7 @@ def chart_acc_flows(df: pd.DataFrame, display_freq: str) -> go.Figure:
     ))
 
     fig.update_yaxes(title_text="kW (moyenne)", gridcolor="#f1f5f9")
-    fig.update_layout(**LAYOUT_BASE, title_text="Flux ACC – Production / Consommation / Échanges réseau", height=450)
+    fig.update_layout(**LAYOUT_BASE, title_text="Flux ACC – Production / Consommation / Échanges réseau", height=480)
     _add_rangebar(fig)
     return fig
 
@@ -634,7 +644,14 @@ def chart_monthly_bars(monthly: pd.DataFrame) -> go.Figure:
     fig.update_layout(
         **LAYOUT_BASE, barmode="stack",
         title_text="Bilan mensuel – Énergie & Taux d'ACC",
-        height=420,
+        height=460,
+        legend=dict(
+            orientation="h", xanchor="center", x=0.5,
+            yanchor="top", y=-0.22,
+            bgcolor="rgba(255,255,255,0.95)",
+            bordercolor="#cbd5e1", borderwidth=1,
+            font=dict(size=11, color="#1e293b"),
+        ),
     )
     fig.update_yaxes(title_text="Énergie (kWh)", secondary_y=False, gridcolor="#f1f5f9")
     fig.update_yaxes(title_text="Taux ACC (%)", secondary_y=True, range=[0, 105], gridcolor=None)
@@ -704,7 +721,14 @@ def chart_economics_monthly(eco_monthly: dict, consumer_keys: list) -> go.Figure
     fig.update_layout(
         **LAYOUT_BASE, barmode="stack",
         title_text="Décomposition mensuelle du coût évité (sans ACC) et économie ACC",
-        height=440,
+        height=480,
+        legend=dict(
+            orientation="h", xanchor="center", x=0.5,
+            yanchor="top", y=-0.22,
+            bgcolor="rgba(255,255,255,0.95)",
+            bordercolor="#cbd5e1", borderwidth=1,
+            font=dict(size=11, color="#1e293b"),
+        ),
     )
     fig.update_yaxes(title_text="Économies (€)", secondary_y=False, gridcolor="#f1f5f9")
     return fig
