@@ -1167,7 +1167,8 @@ with tab_synth:
         ))
 
         fig.update_layout(
-            paper_bgcolor="#f8fafc",
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#ffffff",
             font=dict(color="#1e293b"),
             title=dict(
                 text=f"Consommation en <b>{saison_label}</b>",
