@@ -104,17 +104,23 @@ def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
         step = s.index.to_series().diff().dropna().mode().iloc[0]
         dt_h = step.total_seconds() / 3600
 
-        # Dans cet export Enedis, le champ "volume" contient la puissance moyenne
-        # en kW sur l'intervalle — malgré le label "kWh" dans la colonne unit.
-        # Énergie par intervalle = valeur × dt_h  (ex. kW × 5/60 h = kWh)
-        # → aucune conversion nécessaire, les valeurs sont déjà en kW.
         if unit_raw in ("wh", "w·h", "w.h"):
-            # Si vraiment des Wh/pas : Wh → kW = Wh / (dt_h × 1000)
+            # Wh/pas → kW
             s = s / dt_h / 1000
-            meta["conversion"] = f"Wh/{int(step.total_seconds()//60)} min → kW"
+            meta["conversion"] = f"Wh/pas → kW (÷ {dt_h*1000:.1f})"
         else:
-            # "kwh", "kw" ou autre : valeurs déjà en kW
-            meta["conversion"] = f"kW brut (label unit='{unit_raw}', énergie = valeur × {dt_h:.4f} h)"
+            # "kWh" ou "kW" : détection automatique du format réel.
+            # Certains exports (ex. injections mises à l'échelle) contiennent déjà
+            # de la puissance en kW malgré le label "kWh".
+            # Heuristique : si le pic interprété comme kWh/pas dépasse 30 MW,
+            # les valeurs sont déjà en kW → pas de conversion.
+            # Sinon (format standard Enedis soutirage/injection) : kWh/pas → ÷ dt_h.
+            peak_if_kwh = s.max() / dt_h
+            if peak_if_kwh > 30_000:   # > 30 MW → valeurs déjà en kW
+                meta["conversion"] = f"kW brut (pic {peak_if_kwh/1000:.1f} MW si kWh/pas → interprété kW)"
+            else:                       # format standard kWh/pas
+                s = s / dt_h
+                meta["conversion"] = f"kWh/pas → kW (÷ {dt_h:.4f} h, pic {s.max():.0f} kW)"
 
         return s, meta
 
@@ -170,7 +176,12 @@ def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
             s = s / dt_h / 1000
             meta["conversion"] = f"Wh → kW"
         else:
-            meta["conversion"] = f"kW brut (label='{unit_raw}')"
+            peak_if_kwh = s.max() / dt_h
+            if peak_if_kwh > 30_000:
+                meta["conversion"] = f"kW brut (pic {peak_if_kwh/1000:.1f} MW si kWh/pas)"
+            else:
+                s = s / dt_h
+                meta["conversion"] = f"kWh/pas → kW"
 
     return s, meta
 
