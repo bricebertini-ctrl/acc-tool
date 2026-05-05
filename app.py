@@ -91,7 +91,10 @@ def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
         # → convertit en Europe/Paris → supprime la tz (index naïf)
         dt = pd.to_datetime(df["start_time"], utc=True).dt.tz_convert("Europe/Paris").dt.tz_localize(None)
 
-        values = pd.to_numeric(df["volume"], errors="coerce")
+        values = pd.to_numeric(
+            df["volume"].astype(str).str.replace(",", ".").str.replace(" ", ""),
+            errors="coerce",
+        )
         unit_raw = str(df["unit"].dropna().iloc[0]).strip().lower()
         meta["unit_source"] = unit_raw
 
