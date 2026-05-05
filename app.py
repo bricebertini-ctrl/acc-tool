@@ -1146,13 +1146,13 @@ with tab_synth:
         def _fmt_kwh(v):
             return f"{v:,.0f} kWh".replace(",", "\u202f")
 
-        c_text = f"{_fmt_kwh(complement)}\n{complement/conso_k*100:.1f} %"
-        a_text = f"{_fmt_kwh(acc_k)}\n{acc_k/conso_k*100:.1f} %"
-        emoji  = "\u2600\ufe0f" if saison_label == "\xe9t\xe9" else "\u2744\ufe0f"
+        c_text = f"{_fmt_kwh(complement)}<br>{complement/conso_k*100:.1f} %"
+        a_text = f"{_fmt_kwh(acc_k)}<br>{acc_k/conso_k*100:.1f} %"
+        emoji  = "\u2600\ufe0f" if saison_label == "\u00e9t\u00e9" else "\u2744\ufe0f"
 
         fig = go.Figure()
         fig.add_trace(go.Pie(
-            labels=["Compl\xe9ment r\xe9seau", "Autoconsommation Collective"],
+            labels=["Compl\u00e9ment r\u00e9seau", "Autoconsommation Collective"],
             values=[complement, acc_k],
             marker_colors=[_COLOR_COMPLEMENT, _COLOR_ACC_DONUT],
             marker=dict(line=dict(color="#ffffff", width=3)),
@@ -1163,14 +1163,14 @@ with tab_synth:
             textinfo="text",
             textposition="outside",
             automargin=True,
-            outsidetextfont=dict(size=11, color="#475569", family="Inter, sans-serif"),
+            outsidetextfont=dict(size=11, color="#475569"),
             hovertemplate="<b>%{label}</b><br>%{value:,.0f} kWh<br>%{percent}<extra></extra>",
         ))
 
         fig.update_layout(
             paper_bgcolor="#f8fafc",
             plot_bgcolor="#f8fafc",
-            font=dict(family="Inter, sans-serif", color="#1e293b"),
+            font=dict(color="#1e293b"),
             title=dict(
                 text=f"{emoji}  Consommation en <b>{saison_label}</b>",
                 font=dict(size=14, color="#334155"),
@@ -1185,15 +1185,20 @@ with tab_synth:
             ),
             margin=dict(l=30, r=30, t=55, b=45),
             height=370,
-            annotations=[dict(
-                x=0.5, y=0.52, xref="paper", yref="paper",
-                text=(
-                    f"<span style=\"font-size:26px;font-weight:700;color:#1e3a5f\">"
-                    f"{taux:.0f}\u00a0%</span><br>"
-                    f"<span style=\"font-size:10px;color:#64748b\">taux autoproduction</span>"
+            annotations=[
+                dict(
+                    x=0.5, y=0.56, xref="paper", yref="paper",
+                    text=f"<b>{taux:.0f} %</b>",
+                    showarrow=False, align="center",
+                    font=dict(size=26, color="#1e3a5f"),
                 ),
-                showarrow=False, align="center",
-            )],
+                dict(
+                    x=0.5, y=0.44, xref="paper", yref="paper",
+                    text="taux autoproduction",
+                    showarrow=False, align="center",
+                    font=dict(size=10, color="#64748b"),
+                ),
+            ],
         )
         return fig
 
