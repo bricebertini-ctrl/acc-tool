@@ -109,18 +109,10 @@ def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
             s = s / dt_h / 1000
             meta["conversion"] = f"Wh/pas → kW (÷ {dt_h*1000:.1f})"
         else:
-            # "kWh" ou "kW" : détection automatique du format réel.
-            # Certains exports (ex. injections mises à l'échelle) contiennent déjà
-            # de la puissance en kW malgré le label "kWh".
-            # Heuristique : si le pic interprété comme kWh/pas dépasse 30 MW,
-            # les valeurs sont déjà en kW → pas de conversion.
-            # Sinon (format standard Enedis soutirage/injection) : kWh/pas → ÷ dt_h.
-            peak_if_kwh = s.max() / dt_h
-            if peak_if_kwh > 30_000:   # > 30 MW → valeurs déjà en kW
-                meta["conversion"] = f"kW brut (pic {peak_if_kwh/1000:.1f} MW si kWh/pas → interprété kW)"
-            else:                       # format standard kWh/pas
-                s = s / dt_h
-                meta["conversion"] = f"kWh/pas → kW (÷ {dt_h:.4f} h, pic {s.max():.0f} kW)"
+            # "kWh" ou "kW" : les exports Enedis API contiennent la puissance
+            # moyenne en kW sur l'intervalle (malgré le label "kWh").
+            # Aucune conversion nécessaire.
+            meta["conversion"] = f"kW brut (label='{unit_raw}')"
 
         return s, meta
 
@@ -176,12 +168,7 @@ def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
             s = s / dt_h / 1000
             meta["conversion"] = f"Wh → kW"
         else:
-            peak_if_kwh = s.max() / dt_h
-            if peak_if_kwh > 30_000:
-                meta["conversion"] = f"kW brut (pic {peak_if_kwh/1000:.1f} MW si kWh/pas)"
-            else:
-                s = s / dt_h
-                meta["conversion"] = f"kWh/pas → kW"
+            meta["conversion"] = f"kW brut (label='{unit_raw}')"
 
     return s, meta
 
