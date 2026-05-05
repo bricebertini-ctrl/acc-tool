@@ -136,6 +136,84 @@ def chart_taux_acc(monthly: pd.DataFrame, w: float, h: float) -> bytes:
     return _fig_bytes(fig)
 
 
+# Couleurs donut (identiques à la charte graphique de la slide)
+_DONUT_COMPLEMENT = "#EDE8C4"   # beige clair – Complément réseau
+_DONUT_ACC        = "#4472C4"   # bleu – Autoconsommation Collective
+
+
+def chart_donut_saison(
+    acc_kwh: float,
+    conso_kwh: float,
+    client_name: str,
+    saison_label: str,       # "hiver" ou "été"
+    w: float,
+    h: float,
+) -> bytes:
+    """
+    Donut répartition conso : Complément réseau vs ACC pour une saison.
+    Reproduit fidèlement le style de la slide commerciale.
+    """
+    complement = max(conso_kwh - acc_kwh, 0)
+    taux = acc_kwh / conso_kwh * 100 if conso_kwh > 0 else 0
+
+    sizes  = [complement, acc_kwh]
+    colors = [_DONUT_COMPLEMENT, _DONUT_ACC]
+    labels_raw = ["Complément réseau", "Autoconsommation Collective"]
+
+    fig, ax = plt.subplots(figsize=(w, h))
+    fig.patch.set_facecolor("white")
+
+    wedges, _ = ax.pie(
+        sizes,
+        colors=colors,
+        startangle=90,
+        counterclock=False,
+        wedgeprops=dict(width=0.52, edgecolor="white", linewidth=1.5),
+    )
+
+    # Annotations kWh + % à l'extérieur de chaque part
+    for i, (wedge, val, lbl) in enumerate(zip(wedges, sizes, labels_raw)):
+        angle   = (wedge.theta2 + wedge.theta1) / 2
+        rad_out = 0.78
+        x = rad_out * np.cos(np.radians(angle))
+        y = rad_out * np.sin(np.radians(angle))
+        ha = "right" if x < 0 else "left"
+        kwh_fmt = f"{val:,.0f} kWh".replace(",", " ")
+        pct_fmt = f"{val/conso_kwh*100:.1f} %"
+        ax.annotate(
+            f"{kwh_fmt}\n{pct_fmt}",
+            xy=(x * 0.68, y * 0.68),
+            xytext=(x * 1.18, y * 1.18),
+            ha=ha, va="center",
+            fontsize=7.5, color="#333333",
+            arrowprops=dict(arrowstyle="-", color="#888888", lw=0.8),
+        )
+
+    ax.set_aspect("equal")
+
+    # Titre
+    title = f"Répartition de la consommation\ndu site {client_name} en {saison_label}"
+    ax.set_title(title, fontsize=8.5, color="#333333", pad=8)
+
+    # Légende
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor=_DONUT_COMPLEMENT, label="Complément réseau"),
+        Patch(facecolor=_DONUT_ACC,        label="Autoconsommation Collective"),
+    ]
+    ax.legend(handles=legend_elements, loc="lower center",
+              bbox_to_anchor=(0.5, -0.18), ncol=2, fontsize=7.5,
+              frameon=False, handlelength=1.2)
+
+    # Taux en bas
+    fig.text(0.5, 0.01,
+             f"Taux d'autoproduction {saison_label} : {taux:.0f} %",
+             ha="center", fontsize=9, fontweight="bold", color="#333333")
+
+    fig.tight_layout(rect=[0, 0.08, 1, 1])
+    return _fig_bytes(fig)
+
+
 # ── Mise à jour des tableaux ───────────────────────────────────────────────────
 
 def _update_tariff_table(slide, tariff_option: str, tariff_rates: dict):
@@ -274,18 +352,22 @@ def generate_pptx(
         "2,3 GWh":                            f"{prod_gwh:.2f} GWh",
     })
 
-    # ── Slide 6 : Répartition de la consommation ──────────────────────────────
+    # ── Slide 6 : Répartition de la consommation (donuts saisonniers) ────────
     slide6 = prs.slides[5]
-    _replace_all(slide6, {
-        " 96 ": f" {taux_hiver:.0f} ",
-        "96 %": f"{taux_hiver:.0f} %",
-        " 70 ": f" {taux_ete:.0f} ",
-        "70 %": f"{taux_ete:.0f} %",
-    })
-    img_left  = chart_conso_acc(monthly, w=4.75, h=2.93)
-    img_right = chart_taux_acc(monthly,  w=4.75, h=2.93)
-    _swap_picture_at(slide6, left_in=0.50, top_in=1.06, img_bytes=img_left)
-    _swap_picture_at(slide6, left_in=5.13, top_in=1.06, img_bytes=img_right)
+
+    acc_hiver   = (seasonal.loc["Hiver (nov–mars)", "ACC (kWh)"]
+                   if "Hiver (nov–mars)" in seasonal.index else 0)
+    conso_hiver = (seasonal.loc["Hiver (nov–mars)", "Conso (kWh)"]
+                   if "Hiver (nov–mars)" in seasonal.index else 0)
+    acc_ete     = (seasonal.loc["Été (avr–oct)", "ACC (kWh)"]
+                   if "Été (avr–oct)" in seasonal.index else 0)
+    conso_ete   = (seasonal.loc["Été (avr–oct)", "Conso (kWh)"]
+                   if "Été (avr–oct)" in seasonal.index else 0)
+
+    img_hiver = chart_donut_saison(acc_hiver,  conso_hiver, client_name, "hiver", w=4.75, h=2.93)
+    img_ete   = chart_donut_saison(acc_ete,    conso_ete,   client_name, "été",   w=4.75, h=2.93)
+    _swap_picture_at(slide6, left_in=0.50, top_in=1.06, img_bytes=img_hiver)
+    _swap_picture_at(slide6, left_in=5.13, top_in=1.06, img_bytes=img_ete)
 
     # ── Slide 7 : Proposition tarifaire ───────────────────────────────────────
     _update_tariff_table(prs.slides[6], tariff_option, tariff_rates)

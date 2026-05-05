@@ -1115,10 +1115,80 @@ with tab_synth:
                 return "color: #dc2626; font-weight: 600"
         return ""
 
-    styled_seasonal = seasonal.style.map(
-        style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
-    ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
-    st.dataframe(styled_seasonal, use_container_width=True)
+    # ── Donuts saisonniers ────────────────────────────────────────────────────
+    _COLOR_COMPLEMENT = "#EDE8C4"
+    _COLOR_ACC_DONUT  = "#4472C4"
+
+    def _donut_saison_fig(saison_key: str, saison_label: str):
+        if saison_key not in seasonal.index:
+            return None
+        acc_k   = seasonal.loc[saison_key, "ACC (kWh)"]
+        conso_k = seasonal.loc[saison_key, "Conso (kWh)"]
+        complement = max(conso_k - acc_k, 0)
+        taux = acc_k / conso_k * 100 if conso_k > 0 else 0
+
+        fig = go.Figure()
+        fig.add_trace(go.Pie(
+            labels=["Complément réseau", "Autoconsommation Collective"],
+            values=[complement, acc_k],
+            marker_colors=[_COLOR_COMPLEMENT, _COLOR_ACC_DONUT],
+            hole=0.52,
+            direction="clockwise",
+            sort=False,
+            textinfo="none",
+            hovertemplate="%{label}<br>%{value:,.0f} kWh — %{percent}<extra></extra>",
+        ))
+
+        # Annotations manuelles (kWh + %) comme dans la slide
+        def _fmt_kwh(v):
+            return f"{v:,.0f} kWh".replace(",", " ")
+
+        fig.add_annotation(x=0.05, y=0.35, xref="paper", yref="paper",
+            text=f"<b>{_fmt_kwh(complement)}</b><br>{complement/conso_k*100:.1f} %",
+            showarrow=False, font=dict(size=12, color="#555"), align="left")
+        fig.add_annotation(x=0.88, y=0.75, xref="paper", yref="paper",
+            text=f"<b>{_fmt_kwh(acc_k)}</b><br>{acc_k/conso_k*100:.1f} %",
+            showarrow=False, font=dict(size=12, color="#555"), align="right")
+
+        fig.update_layout(
+            title=dict(
+                text=f"Répartition de la consommation en <b>{saison_label}</b>",
+                font=dict(size=13, color="#333"),
+                x=0.5, xanchor="center",
+            ),
+            showlegend=True,
+            legend=dict(
+                orientation="h", x=0.5, xanchor="center", y=-0.08,
+                font=dict(size=11),
+            ),
+            margin=dict(l=10, r=10, t=60, b=60),
+            height=320,
+            annotations=fig.layout.annotations + (
+                dict(
+                    x=0.5, y=-0.18, xref="paper", yref="paper",
+                    text=f"<b>Taux d'autoproduction {saison_label} : {taux:.0f} %</b>",
+                    showarrow=False, font=dict(size=13, color="#1e3a5f"), align="center"
+                ),
+            ),
+        )
+        return fig
+
+    _col_hiver, _col_ete = st.columns(2)
+    with _col_hiver:
+        _fig_hiver = _donut_saison_fig("Hiver (nov–mars)", "hiver")
+        if _fig_hiver:
+            st.plotly_chart(_fig_hiver, use_container_width=True)
+    with _col_ete:
+        _fig_ete = _donut_saison_fig("Été (avr–oct)", "été")
+        if _fig_ete:
+            st.plotly_chart(_fig_ete, use_container_width=True)
+
+    # ── Tableau saisonnier détaillé ───────────────────────────────────────────
+    with st.expander("Tableau saisonnier détaillé"):
+        styled_seasonal = seasonal.style.map(
+            style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
+        ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
+        st.dataframe(styled_seasonal, use_container_width=True)
 
     st.divider()
 
