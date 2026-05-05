@@ -1146,49 +1146,53 @@ with tab_synth:
         def _fmt_kwh(v):
             return f"{v:,.0f} kWh".replace(",", "\u202f")
 
-        c_text = f"<b>{_fmt_kwh(complement)}</b><br>{complement/conso_k*100:.1f} %"
-        a_text = f"<b>{_fmt_kwh(acc_k)}</b><br>{acc_k/conso_k*100:.1f} %"
+        c_text = f"{_fmt_kwh(complement)}\n{complement/conso_k*100:.1f} %"
+        a_text = f"{_fmt_kwh(acc_k)}\n{acc_k/conso_k*100:.1f} %"
+        emoji  = "\u2600\ufe0f" if saison_label == "\xe9t\xe9" else "\u2744\ufe0f"
 
         fig = go.Figure()
         fig.add_trace(go.Pie(
-            labels=["Complément réseau", "Autoconsommation Collective"],
+            labels=["Compl\xe9ment r\xe9seau", "Autoconsommation Collective"],
             values=[complement, acc_k],
             marker_colors=[_COLOR_COMPLEMENT, _COLOR_ACC_DONUT],
-            hole=0.52,
+            marker=dict(line=dict(color="#ffffff", width=3)),
+            hole=0.58,
             direction="clockwise",
             sort=False,
             text=[c_text, a_text],
             textinfo="text",
             textposition="outside",
             automargin=True,
-            outsidetextfont=dict(size=12, color="#333333"),
-            insidetextorientation="horizontal",
-            hovertemplate="%{label}<br>%{value:,.0f} kWh — %{percent}<extra></extra>",
+            outsidetextfont=dict(size=11, color="#475569", family="Inter, sans-serif"),
+            hovertemplate="<b>%{label}</b><br>%{value:,.0f} kWh<br>%{percent}<extra></extra>",
         ))
 
         fig.update_layout(
-            paper_bgcolor="#ffffff",
-            plot_bgcolor="#ffffff",
-            font=dict(color="#1e293b"),
+            paper_bgcolor="#f8fafc",
+            plot_bgcolor="#f8fafc",
+            font=dict(family="Inter, sans-serif", color="#1e293b"),
             title=dict(
-                text=f"Répartition de la consommation en <b>{saison_label}</b>",
-                font=dict(size=13, color="#1e293b"),
-                x=0.5, xanchor="center",
+                text=f"{emoji}  Consommation en <b>{saison_label}</b>",
+                font=dict(size=14, color="#334155"),
+                x=0.5, xanchor="center", y=0.97,
             ),
             showlegend=True,
             legend=dict(
-                orientation="h", x=0.5, xanchor="center", y=-0.05,
-                font=dict(size=11, color="#1e293b"),
-                bgcolor="rgba(255,255,255,0.9)",
+                orientation="h", x=0.5, xanchor="center", y=-0.04,
+                font=dict(size=11, color="#475569"),
+                bgcolor="rgba(0,0,0,0)",
+                itemgap=16,
             ),
-            margin=dict(l=20, r=20, t=50, b=40),
-            height=360,
+            margin=dict(l=30, r=30, t=55, b=45),
+            height=370,
             annotations=[dict(
-                x=0.5, y=0.5, xref="paper", yref="paper",
-                text=f"<b>{taux:.0f} %</b><br><span style='font-size:10px'>autoproduction<br>{saison_label}</span>",
-                showarrow=False,
-                font=dict(size=18, color="#1e3a5f"),
-                align="center",
+                x=0.5, y=0.52, xref="paper", yref="paper",
+                text=(
+                    f"<span style=\"font-size:26px;font-weight:700;color:#1e3a5f\">"
+                    f"{taux:.0f}\u00a0%</span><br>"
+                    f"<span style=\"font-size:10px;color:#64748b\">taux autoproduction</span>"
+                ),
+                showarrow=False, align="center",
             )],
         )
         return fig
