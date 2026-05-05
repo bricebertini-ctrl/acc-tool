@@ -744,6 +744,7 @@ with st.sidebar:
     st.caption("Autoconsommation collective – Dimensionnement énergétique")
     if st.button("🔄 Réinitialiser", help="Vide le cache et recharge l'app", use_container_width=True):
         st.cache_data.clear()
+        st.toast("✅ Cache vidé — rechargement en cours…", icon="🔄")
         st.rerun()
     st.divider()
 
