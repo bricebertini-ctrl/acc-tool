@@ -60,7 +60,6 @@ _SKIP_COLS = {"prm", "pdl", "pce", "site_id", "meter_id", "id", "identifiant",
               "provider", "model", "variant", "data_type", "unit"}
 
 
-@st.cache_data(show_spinner=False)
 def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
     """
     Charge un CSV et retourne (Series puissance en kW, métadonnées).
@@ -718,6 +717,9 @@ def chart_economics_monthly(eco_monthly: dict, consumer_keys: list) -> go.Figure
 with st.sidebar:
     st.markdown("### ⚡ Outil ACC")
     st.caption("Autoconsommation collective – Dimensionnement énergétique")
+    if st.button("🔄 Réinitialiser", help="Vide le cache et recharge l'app", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
     st.divider()
 
     st.markdown("**1 · Charger le(s) producteur(s)**")
