@@ -1146,6 +1146,9 @@ with tab_synth:
         def _fmt_kwh(v):
             return f"{v:,.0f} kWh".replace(",", "\u202f")
 
+        c_text = f"<b>{_fmt_kwh(complement)}</b><br>{complement/conso_k*100:.1f} %"
+        a_text = f"<b>{_fmt_kwh(acc_k)}</b><br>{acc_k/conso_k*100:.1f} %"
+
         fig = go.Figure()
         fig.add_trace(go.Pie(
             labels=["Complément réseau", "Autoconsommation Collective"],
@@ -1154,7 +1157,12 @@ with tab_synth:
             hole=0.52,
             direction="clockwise",
             sort=False,
-            textinfo="none",
+            text=[c_text, a_text],
+            textinfo="text",
+            textposition="outside",
+            automargin=True,
+            outsidetextfont=dict(size=12, color="#333333"),
+            insidetextorientation="horizontal",
             hovertemplate="%{label}<br>%{value:,.0f} kWh — %{percent}<extra></extra>",
         ))
 
@@ -1173,27 +1181,13 @@ with tab_synth:
                 font=dict(size=11, color="#1e293b"),
                 bgcolor="rgba(255,255,255,0.9)",
             ),
-            margin=dict(l=60, r=60, t=50, b=80),
-            height=340,
-            annotations=[
-                dict(
-                    x=0.15, y=0.28, xref="paper", yref="paper",
-                    text=f"<b>{_fmt_kwh(complement)}</b><br>{complement/conso_k*100:.1f} %",
-                    showarrow=False, font=dict(size=12, color="#333"), align="center",
-                    bgcolor="rgba(255,255,255,0.85)", borderpad=4,
-                ),
-                dict(
-                    x=0.85, y=0.72, xref="paper", yref="paper",
-                    text=f"<b>{_fmt_kwh(acc_k)}</b><br>{acc_k/conso_k*100:.1f} %",
-                    showarrow=False, font=dict(size=12, color="#333"), align="center",
-                    bgcolor="rgba(255,255,255,0.85)", borderpad=4,
-                ),
-                dict(
-                    x=0.5, y=-0.14, xref="paper", yref="paper",
-                    text=f"<b>Taux d'autoproduction {saison_label} : {taux:.0f} %</b>",
-                    showarrow=False, font=dict(size=13, color="#1e3a5f"), align="center",
-                ),
-            ],
+            margin=dict(l=20, r=20, t=50, b=70),
+            height=360,
+            annotations=[dict(
+                x=0.5, y=-0.12, xref="paper", yref="paper",
+                text=f"<b>Taux d'autoproduction {saison_label} : {taux:.0f} %</b>",
+                showarrow=False, font=dict(size=13, color="#1e3a5f"), align="center",
+            )],
         )
         return fig
 
