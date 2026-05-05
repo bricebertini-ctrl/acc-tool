@@ -648,13 +648,6 @@ def chart_monthly_bars(monthly: pd.DataFrame) -> go.Figure:
         **LAYOUT_BASE, barmode="stack",
         title_text="Bilan mensuel – Énergie & Taux d'ACC",
         height=460,
-        legend=dict(
-            orientation="h", xanchor="center", x=0.5,
-            yanchor="top", y=-0.22,
-            bgcolor="rgba(255,255,255,0.95)",
-            bordercolor="#cbd5e1", borderwidth=1,
-            font=dict(size=11, color="#1e293b"),
-        ),
     )
     fig.update_yaxes(title_text="Énergie (kWh)", secondary_y=False, gridcolor="#f1f5f9")
     fig.update_yaxes(title_text="Taux ACC (%)", secondary_y=True, range=[0, 105], gridcolor=None)
@@ -725,13 +718,6 @@ def chart_economics_monthly(eco_monthly: dict, consumer_keys: list) -> go.Figure
         **LAYOUT_BASE, barmode="stack",
         title_text="Décomposition mensuelle du coût évité (sans ACC) et économie ACC",
         height=480,
-        legend=dict(
-            orientation="h", xanchor="center", x=0.5,
-            yanchor="top", y=-0.22,
-            bgcolor="rgba(255,255,255,0.95)",
-            bordercolor="#cbd5e1", borderwidth=1,
-            font=dict(size=11, color="#1e293b"),
-        ),
     )
     fig.update_yaxes(title_text="Économies (€)", secondary_y=False, gridcolor="#f1f5f9")
     return fig
