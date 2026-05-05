@@ -1162,28 +1162,24 @@ with tab_synth:
             text=[c_text, a_text],
             textinfo="text",
             textposition="outside",
-            automargin=True,
             outsidetextfont=dict(size=11, color="#475569"),
             hovertemplate="<b>%{label}</b><br>%{value:,.0f} kWh<br>%{percent}<extra></extra>",
         ))
 
         fig.update_layout(
             paper_bgcolor="#f8fafc",
-            plot_bgcolor="#f8fafc",
             font=dict(color="#1e293b"),
             title=dict(
-                text=f"{emoji}  Consommation en <b>{saison_label}</b>",
+                text=f"Consommation en <b>{saison_label}</b>",
                 font=dict(size=14, color="#334155"),
-                x=0.5, xanchor="center", y=0.97,
+                x=0.5, xanchor="center",
             ),
             showlegend=True,
             legend=dict(
                 orientation="h", x=0.5, xanchor="center", y=-0.04,
                 font=dict(size=11, color="#475569"),
-                bgcolor="rgba(0,0,0,0)",
-                itemgap=16,
             ),
-            margin=dict(l=30, r=30, t=55, b=45),
+            margin=dict(l=30, r=30, t=50, b=50),
             height=370,
             annotations=[
                 dict(
