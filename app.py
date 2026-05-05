@@ -1181,12 +1181,14 @@ with tab_synth:
                 font=dict(size=11, color="#1e293b"),
                 bgcolor="rgba(255,255,255,0.9)",
             ),
-            margin=dict(l=20, r=20, t=50, b=70),
+            margin=dict(l=20, r=20, t=50, b=40),
             height=360,
             annotations=[dict(
-                x=0.5, y=-0.12, xref="paper", yref="paper",
-                text=f"<b>Taux d'autoproduction {saison_label} : {taux:.0f} %</b>",
-                showarrow=False, font=dict(size=13, color="#1e3a5f"), align="center",
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                text=f"<b>{taux:.0f} %</b><br><span style='font-size:10px'>autoproduction<br>{saison_label}</span>",
+                showarrow=False,
+                font=dict(size=18, color="#1e3a5f"),
+                align="center",
             )],
         )
         return fig
