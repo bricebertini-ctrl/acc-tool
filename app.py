@@ -1143,6 +1143,9 @@ with tab_synth:
         complement = max(conso_k - acc_k, 0)
         taux = acc_k / conso_k * 100 if conso_k > 0 else 0
 
+        def _fmt_kwh(v):
+            return f"{v:,.0f} kWh".replace(",", "\u202f")
+
         fig = go.Figure()
         fig.add_trace(go.Pie(
             labels=["Complément réseau", "Autoconsommation Collective"],
@@ -1155,37 +1158,42 @@ with tab_synth:
             hovertemplate="%{label}<br>%{value:,.0f} kWh — %{percent}<extra></extra>",
         ))
 
-        # Annotations manuelles (kWh + %) comme dans la slide
-        def _fmt_kwh(v):
-            return f"{v:,.0f} kWh".replace(",", " ")
-
-        fig.add_annotation(x=0.05, y=0.35, xref="paper", yref="paper",
-            text=f"<b>{_fmt_kwh(complement)}</b><br>{complement/conso_k*100:.1f} %",
-            showarrow=False, font=dict(size=12, color="#555"), align="left")
-        fig.add_annotation(x=0.88, y=0.75, xref="paper", yref="paper",
-            text=f"<b>{_fmt_kwh(acc_k)}</b><br>{acc_k/conso_k*100:.1f} %",
-            showarrow=False, font=dict(size=12, color="#555"), align="right")
-
         fig.update_layout(
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#ffffff",
+            font=dict(color="#1e293b"),
             title=dict(
                 text=f"Répartition de la consommation en <b>{saison_label}</b>",
-                font=dict(size=13, color="#333"),
+                font=dict(size=13, color="#1e293b"),
                 x=0.5, xanchor="center",
             ),
             showlegend=True,
             legend=dict(
-                orientation="h", x=0.5, xanchor="center", y=-0.08,
-                font=dict(size=11),
+                orientation="h", x=0.5, xanchor="center", y=-0.05,
+                font=dict(size=11, color="#1e293b"),
+                bgcolor="rgba(255,255,255,0.9)",
             ),
-            margin=dict(l=10, r=10, t=60, b=60),
-            height=320,
-            annotations=fig.layout.annotations + (
+            margin=dict(l=60, r=60, t=50, b=80),
+            height=340,
+            annotations=[
                 dict(
-                    x=0.5, y=-0.18, xref="paper", yref="paper",
-                    text=f"<b>Taux d'autoproduction {saison_label} : {taux:.0f} %</b>",
-                    showarrow=False, font=dict(size=13, color="#1e3a5f"), align="center"
+                    x=0.15, y=0.28, xref="paper", yref="paper",
+                    text=f"<b>{_fmt_kwh(complement)}</b><br>{complement/conso_k*100:.1f} %",
+                    showarrow=False, font=dict(size=12, color="#333"), align="center",
+                    bgcolor="rgba(255,255,255,0.85)", borderpad=4,
                 ),
-            ),
+                dict(
+                    x=0.85, y=0.72, xref="paper", yref="paper",
+                    text=f"<b>{_fmt_kwh(acc_k)}</b><br>{acc_k/conso_k*100:.1f} %",
+                    showarrow=False, font=dict(size=12, color="#333"), align="center",
+                    bgcolor="rgba(255,255,255,0.85)", borderpad=4,
+                ),
+                dict(
+                    x=0.5, y=-0.14, xref="paper", yref="paper",
+                    text=f"<b>Taux d'autoproduction {saison_label} : {taux:.0f} %</b>",
+                    showarrow=False, font=dict(size=13, color="#1e3a5f"), align="center",
+                ),
+            ],
         )
         return fig
 
