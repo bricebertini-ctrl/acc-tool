@@ -55,6 +55,11 @@ def _detect_delimiter(text: str) -> str:
 # Colonnes caractéristiques du format Enedis API (soutirage / injection)
 _ENEDIS_COLS = {"start_time", "end_time", "prm", "volume", "unit"}
 
+# Format agrégateur interne (Focus Plant / Bohr) : colonne time + puissances nommées
+_FOCUSPLANT_COLS = {"time", "official_definitive"}
+# Priorité des colonnes puissance dans ce format (première non-vide utilisée)
+_FOCUSPLANT_PWR_COLS = ["official_definitive", "official_daily", "official_ifj", "measure"]
+
 # Colonnes à ignorer lors de la détection générique (identifiants, codes…)
 _SKIP_COLS = {"prm", "pdl", "pce", "site_id", "meter_id", "id", "identifiant",
               "provider", "model", "variant", "data_type", "unit"}
@@ -117,6 +122,40 @@ def load_curve(file_bytes: bytes, filename: str) -> tuple[pd.Series, dict]:
             # Aucune conversion nécessaire.
             meta["conversion"] = f"kW brut (label='{unit_raw}')"
 
+        return s, meta
+
+    # ── Branche agrégateur Focus Plant / Bohr ────────────────────────────────
+    # Format : colonne "time" (heure locale Paris naïve) + colonnes official_*
+    if _FOCUSPLANT_COLS.issubset(set(df.columns)):
+        meta["format"] = "Agrégateur (Focus Plant)"
+
+        # Timestamps en heure locale → pas de conversion UTC, parsing direct
+        dt = pd.to_datetime(df["time"], dayfirst=False)
+
+        # Première colonne puissance disponible avec assez de données
+        val_col = None
+        for col in _FOCUSPLANT_PWR_COLS:
+            if col in df.columns:
+                v = pd.to_numeric(df[col], errors="coerce")
+                if v.notna().mean() > 0.5:
+                    val_col = col
+                    break
+
+        if val_col is None:
+            raise ValueError(
+                f"Aucune colonne puissance valide trouvée dans « {filename} » "
+                f"(cherché : {_FOCUSPLANT_PWR_COLS})"
+            )
+
+        meta["unit_source"] = "kW"
+        meta["conversion"] = f"kW brut (colonne '{val_col}')"
+        s = pd.Series(
+            pd.to_numeric(df[val_col], errors="coerce").values,
+            index=pd.DatetimeIndex(dt),
+            name=filename,
+        )
+        s = s.sort_index().dropna().clip(lower=0)
+        s = s[~s.index.duplicated(keep="first")]
         return s, meta
 
     # ── Branche générique ─────────────────────────────────────────────────────
