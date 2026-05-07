@@ -892,13 +892,59 @@ with st.spinner("Chargement et traitement des courbes de charge…"):
 
     try:
         aligned, timestep, raw_steps, gaps = align_series(raw, producer_keys)
-        df_flows, df_energy, annual, monthly, seasonal = compute_acc(aligned, producer_keys, timestep)
+    except Exception as e:
+        st.error(f"Erreur lors de l'alignement : {e}")
+        st.stop()
+
+# ── Sélection des consommateurs (filtrage trous) ───────────────────────────────
+_all_consumers = [k for k in aligned if k not in producer_keys]
+step_aligned_min = int(timestep.total_seconds() // 60)
+
+# Calcul % de trous par consommateur (sur la série alignée)
+_gap_pct = {}
+for k in _all_consumers:
+    s = aligned[k]
+    # Reconstituer les NaN : comparer avec la série brute rééchantillonnée
+    s_raw = raw[k].reindex(s.index)
+    _gap_pct[k] = s_raw.isna().mean() * 100
+
+# Affichage sidebar + cases à cocher
+with st.sidebar:
+    if _all_consumers:
+        st.divider()
+        st.markdown("**Consommateurs à inclure**")
+        st.caption("Décochez les sites avec trop de trous.")
+        _active_consumers = []
+        for k in _all_consumers:
+            pct = _gap_pct[k]
+            label_color = "🔴" if pct > 20 else ("🟡" if pct > 5 else "🟢")
+            short = k[:28] + "…" if len(k) > 30 else k
+            checked = st.checkbox(
+                f"{label_color} {short}",
+                value=True,
+                help=f"{pct:.1f} % de trous après rééchantillonnage",
+                key=f"conso_active_{k}",
+            )
+            if checked:
+                _active_consumers.append(k)
+        if not _active_consumers:
+            st.warning("Sélectionnez au moins un consommateur.")
+            st.stop()
+
+# Recalcul ACC avec seulement les consommateurs actifs
+_active_keys = producer_keys + _active_consumers
+_aligned_filtered = {k: aligned[k] for k in _active_keys}
+
+with st.spinner("Calcul ACC…"):
+    try:
+        df_flows, df_energy, annual, monthly, seasonal = compute_acc(
+            _aligned_filtered, producer_keys, timestep
+        )
     except Exception as e:
         st.error(f"Erreur lors du calcul ACC : {e}")
         st.stop()
 
-consumer_keys    = [k for k in aligned if k not in producer_keys]
-step_aligned_min = int(timestep.total_seconds() // 60)
+consumer_keys = _active_consumers
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
