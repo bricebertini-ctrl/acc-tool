@@ -742,7 +742,7 @@ def chart_economics_monthly(eco_monthly: dict, consumer_keys: list) -> go.Figure
             months = df.index.tolist()
             color  = NET_COLORS[i % len(NET_COLORS)]
             fig.add_trace(go.Bar(
-                x=months, y=df["Total éco. HT (€)"].round(0),
+                x=months, y=df["Coût sans ACC HT (€)"].round(0),
                 name=k, marker_color=color, opacity=0.85,
                 hovertemplate=f"{k} HT : %{{y:,.0f}} €<extra></extra>",
             ), secondary_y=False)
