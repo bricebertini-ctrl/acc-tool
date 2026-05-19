@@ -525,13 +525,16 @@ def chart_raw_curves(series_dict: dict, steps: dict, producer_keys: list) -> go.
     prod_idx  = 0
     conso_idx = 0
 
+    # vertical_spacing × (rows-1) doit être ≤ 1.0 — on adapte au nombre de sous-graphes
+    v_spacing = min(0.08, 0.9 / max(n - 1, 1))
+
     fig = make_subplots(
         rows=n, cols=1, shared_xaxes=True,
         subplot_titles=[
             f"{'[PROD] ' if k in producer_keys else '[CONSO] '}{k}  ·  pas {int(steps[k].total_seconds()//60)} min"
             for k in labels
         ],
-        vertical_spacing=0.08,
+        vertical_spacing=v_spacing,
     )
     for i, k in enumerate(labels, 1):
         s = series_dict[k]
@@ -552,7 +555,9 @@ def chart_raw_curves(series_dict: dict, steps: dict, producer_keys: list) -> go.
             row=i, col=1,
         )
         fig.update_yaxes(title_text="kW", row=i, col=1, gridcolor="#f1f5f9")
-    fig.update_layout(**LAYOUT_BASE, height=max(260 * n, 380), showlegend=False, title_text="Vérification des courbes de charge brutes")
+    # Hauteur adaptée : 260px/courbe jusqu'à 5 courbes, 150px au-delà (chart scrollable)
+    h_per_row = 260 if n <= 5 else 150
+    fig.update_layout(**LAYOUT_BASE, height=max(h_per_row * n, 380), showlegend=False, title_text="Vérification des courbes de charge brutes")
     _add_rangebar(fig)
     return fig
 
