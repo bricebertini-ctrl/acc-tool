@@ -1411,10 +1411,14 @@ with tab_synth:
     st.subheader("🏘️ Panorama des consommateurs potentiels")
 
     def _prm_label(k: str) -> str:
-        """Extrait le numéro PRM du nom de fichier et le préfixe 'PRM '
-        pour que Plotly ne l'interprète pas comme un grand entier."""
+        """Retourne le label client/bâtiment si le mapping est disponible,
+        sinon 'PRM XXXXXX' pour éviter que Plotly interprète comme un nombre."""
         m = re.match(r"(\d{10,14})", k)
         num = m.group(1) if m else k.split("_")[0]
+        # Chercher dans le mapping chargé depuis le fichier de prospection
+        _lmap = _get_file_store().get("prm_labels", {})
+        if num in _lmap:
+            return _lmap[num]["label"]
         return f"PRM {num}"
 
     # ── Calcul des stats individuelles ───────────────────────────────────────
@@ -1954,8 +1958,51 @@ with tab_prosp:
         st.stop()
 
     # ── Chargement et nettoyage ───────────────────────────────────────────────
-    _df_p = pd.read_excel(pd.io.common.BytesIO(_prosp_bytes))
+    _xl_prosp = pd.ExcelFile(pd.io.common.BytesIO(_prosp_bytes))
+    _df_p = _xl_prosp.parse(_xl_prosp.sheet_names[0])
     _df_p.columns = [str(c).strip() for c in _df_p.columns]
+
+    # ── Feuille pdlclient → mapping PRM → label client/bâtiment ─────────────
+    def _parse_pdlclient(xl):
+        """Retourne {prm_str: label_court} depuis la feuille pdlclient si elle existe."""
+        if "pdlclient" not in xl.sheet_names:
+            return {}
+        df_pdl = xl.parse("pdlclient")
+        df_pdl.columns = [str(c).strip() for c in df_pdl.columns]
+        col_rs  = next((c for c in df_pdl.columns if "raison" in c.lower() or "nom" in c.lower()), None)
+        col_pdl = next((c for c in df_pdl.columns if "pdl" in c.lower() or "prm" in c.lower()), None)
+        if not col_rs or not col_pdl:
+            return {}
+        mapping = {}
+        for _, row in df_pdl.iterrows():
+            client  = str(row[col_rs]).strip()
+            pdl_val = str(row[col_pdl]).strip()
+            if not pdl_val or pdl_val.lower() == "nan":
+                continue
+            if "\n" in pdl_val:
+                # Cellule multi-PRM : "12261215546658    ESPACE LIBERTE\n..."
+                for line in pdl_val.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(None, 1)
+                    if not parts:
+                        continue
+                    prm = parts[0].strip()
+                    loc = parts[1].strip() if len(parts) > 1 else ""
+                    # Label court : "Bâtiment (20 car max)"
+                    label = loc[:28] if loc else client[:28]
+                    mapping[prm] = {"client": client, "location": loc, "label": label}
+            else:
+                # PRM unique
+                prm = re.sub(r"\.0$", "", pdl_val.replace(" ", ""))
+                if prm:
+                    mapping[prm] = {"client": client, "location": "", "label": client[:28]}
+        return mapping
+
+    _prm_labels_map = _parse_pdlclient(_xl_prosp)
+    # Persistance du mapping pour les autres onglets (Synthèse)
+    _get_file_store()["prm_labels"] = _prm_labels_map
 
     # Colonnes canoniques (tolérantes aux variantes de nommage)
     def _find_col(df, *candidates):
@@ -2148,21 +2195,47 @@ with tab_prosp:
     _styled_prosp = _df_table.style.apply(_color_statut_row, axis=1)
     st.dataframe(_styled_prosp, use_container_width=True, height=min(600, 38 * len(_df_table) + 40))
 
-    # ── Lien avec les données chargées ────────────────────────────────────────
-    if _col_prm and _n_prm > 0:
-        st.divider()
-        st.markdown("**🔗 Correspondance PRM ↔ courbes de charge chargées**")
-        _prm_loaded = set()
-        for _k in consumer_keys:
-            _m = re.match(r"(\d{10,14})", _k)
-            if _m:
-                _prm_loaded.add(_m.group(1))
-        _prm_prosp = _df_p[_col_prm].dropna().astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        _matches = _prm_prosp[_prm_prosp.isin(_prm_loaded)]
-        if not _matches.empty:
-            st.success(f"✅ {len(_matches)} prospect(s) avec courbe de charge chargée : {', '.join(_matches.values)}")
+    # ── Correspondance PRM chargés ↔ clients/bâtiments ───────────────────────
+    st.divider()
+    st.markdown("**🔗 Courbes de charge chargées — identification clients**")
+
+    _prm_loaded_map = {}
+    for _k in consumer_keys:
+        _m = re.match(r"(\d{10,14})", _k)
+        if _m:
+            _prm_loaded_map[_m.group(1)] = _k
+
+    if _prm_labels_map:
+        _rows_match = []
+        for prm, info in _prm_labels_map.items():
+            loaded = prm in _prm_loaded_map
+            _rows_match.append({
+                "PRM": prm,
+                "Client": info["client"],
+                "Bâtiment / Site": info["location"] or "—",
+                "Courbe chargée": "✅ Oui" if loaded else "—",
+            })
+        _df_match = pd.DataFrame(_rows_match).sort_values(
+            ["Client", "Bâtiment / Site"]
+        ).reset_index(drop=True)
+        _df_match.index += 1
+
+        def _color_loaded(row):
+            bg = "#f0fdf4" if row["Courbe chargée"] == "✅ Oui" else "#f8fafc"
+            return [f"background-color: {bg}"] * len(row)
+
+        st.dataframe(
+            _df_match.style.apply(_color_loaded, axis=1),
+            use_container_width=True,
+            height=min(500, 38 * len(_df_match) + 40),
+        )
+        _n_loaded_match = sum(1 for p in _prm_labels_map if p in _prm_loaded_map)
+        if _n_loaded_match:
+            st.success(f"✅ {_n_loaded_match} / {len(_prm_labels_map)} bâtiments avec courbe de charge chargée")
         else:
-            st.info("Aucun PRM du fichier de prospection ne correspond aux courbes chargées.")
+            st.info("Aucune des courbes chargées ne correspond au mapping PRM du fichier de prospection.")
+    else:
+        st.info("Ajoutez une feuille 'pdlclient' dans votre Excel pour activer l'identification des bâtiments.")
 
 # ─── Tab 7 : Export PPTX ─────────────────────────────────────────────────────
 
