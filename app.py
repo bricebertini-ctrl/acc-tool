@@ -1415,11 +1415,12 @@ with tab_synth:
         return m.group(1) if m else k.split("_")[0]
 
     # ── Calcul des stats individuelles ───────────────────────────────────────
+    _dt_h_synth    = timestep.total_seconds() / 3600   # dt_h local au tab
     _total_acc_kwh = annual["ACC (kWh)"]
     _conso_rows = []
     for _k in consumer_keys:
-        _e_conso = df_flows[_k].sum() * dt_h
-        _e_acc   = df_flows[f"P_acc_{_k}"].sum() * dt_h
+        _e_conso = df_flows[_k].sum() * _dt_h_synth
+        _e_acc   = df_flows[f"P_acc_{_k}"].sum() * _dt_h_synth
         _taux    = _e_acc / _e_conso * 100 if _e_conso > 0 else 0.0
         _contrib = _e_acc / _total_acc_kwh * 100 if _total_acc_kwh > 0 else 0.0
         _max_kw  = df_flows[_k].max()
