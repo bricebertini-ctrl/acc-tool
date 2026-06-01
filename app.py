@@ -5,6 +5,7 @@ Saisons tarifaires : Été = 1 avr – 31 oct | Hiver = 1 nov – 31 mars
 """
 
 import datetime
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -1318,6 +1319,135 @@ with tab_synth:
         style_pct, subset=["Taux ACC prod (%)", "Taux ACC conso (%)"]
     ).format("{:,.0f}", subset=["Prod (kWh)", "Conso (kWh)", "ACC (kWh)", "Surplus réseau (kWh)", "Déficit réseau (kWh)"])
     st.dataframe(styled_monthly, use_container_width=True)
+
+    st.divider()
+
+    # ── Panorama des consommateurs potentiels ─────────────────────────────────
+    st.subheader("🏘️ Panorama des consommateurs potentiels")
+
+    def _prm_label(k: str) -> str:
+        """Extrait le numéro PRM du nom de fichier."""
+        m = re.match(r"(\d{10,14})", k)
+        return m.group(1) if m else k.split("_")[0]
+
+    # ── Calcul des stats individuelles ───────────────────────────────────────
+    _total_acc_kwh = annual["ACC (kWh)"]
+    _conso_rows = []
+    for _k in consumer_keys:
+        _e_conso = df_flows[_k].sum() * dt_h
+        _e_acc   = df_flows[f"P_acc_{_k}"].sum() * dt_h
+        _taux    = _e_acc / _e_conso * 100 if _e_conso > 0 else 0.0
+        _contrib = _e_acc / _total_acc_kwh * 100 if _total_acc_kwh > 0 else 0.0
+        _max_kw  = df_flows[_k].max()
+        _gap     = _gap_pct.get(_k, 0.0)
+        _conso_rows.append({
+            "PRM":                        _prm_label(_k),
+            "Conso annuelle (kWh)":       round(_e_conso),
+            "ACC reçue (kWh)":            round(_e_acc),
+            "Taux autoproduction (%)":    round(_taux, 1),
+            "Contribution à l'ACC (%)":   round(_contrib, 1),
+            "Puissance max (kW)":         round(_max_kw, 1),
+            "Trous données (%)":          round(_gap, 1),
+        })
+
+    _df_consos = (
+        pd.DataFrame(_conso_rows)
+        .sort_values("Conso annuelle (kWh)", ascending=False)
+        .reset_index(drop=True)
+    )
+    _df_consos.index = _df_consos.index + 1   # classement 1…N
+
+    # ── KPIs résumé ──────────────────────────────────────────────────────────
+    _kc1, _kc2, _kc3, _kc4 = st.columns(4)
+    _tot_conso_membres = _df_consos["Conso annuelle (kWh)"].sum()
+    _avg_taux_ap       = _df_consos["Taux autoproduction (%)"].mean()
+    _top1_prm          = _df_consos["PRM"].iloc[0]
+    _top1_conso        = _df_consos["Conso annuelle (kWh)"].iloc[0]
+    _kpi_color_taux    = "kpi-green" if _avg_taux_ap >= 50 else ("kpi-orange" if _avg_taux_ap >= 25 else "kpi-red")
+    with _kc1:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value kpi-blue">{len(consumer_keys)}</div>'
+                    f'<div class="kpi-label">Consommateurs membres</div></div>', unsafe_allow_html=True)
+    with _kc2:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value kpi-blue">{_tot_conso_membres/1000:,.1f} MWh</div>'
+                    f'<div class="kpi-label">Conso totale membres</div></div>', unsafe_allow_html=True)
+    with _kc3:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value {_kpi_color_taux}">{_avg_taux_ap:.1f} %</div>'
+                    f'<div class="kpi-label">Taux autoproduction moyen</div></div>', unsafe_allow_html=True)
+    with _kc4:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value kpi-purple">{_top1_conso/1000:,.1f} MWh</div>'
+                    f'<div class="kpi-label">1er conso · PRM {_top1_prm}</div></div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Bar chart horizontal — classement consommation ────────────────────────
+    _df_sorted_bar = _df_consos.sort_values("Conso annuelle (kWh)", ascending=True)
+
+    def _taux_bar_color(t: float) -> str:
+        if t >= 50:  return "#16a34a"
+        if t >= 25:  return "#ca8a04"
+        return "#2563eb"
+
+    _bar_colors = [_taux_bar_color(t) for t in _df_sorted_bar["Taux autoproduction (%)"]]
+    _bar_texts  = [
+        f"  {v/1000:.1f} MWh · {t:.0f} % ACC"
+        for v, t in zip(_df_sorted_bar["Conso annuelle (kWh)"], _df_sorted_bar["Taux autoproduction (%)"])
+    ]
+
+    _fig_rank = go.Figure()
+    _fig_rank.add_trace(go.Bar(
+        y=_df_sorted_bar["PRM"],
+        x=_df_sorted_bar["Conso annuelle (kWh)"],
+        orientation="h",
+        marker_color=_bar_colors,
+        text=_bar_texts,
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate="<b>PRM %{y}</b><br>Conso : %{x:,.0f} kWh<extra></extra>",
+    ))
+    _fig_rank.update_layout(**LAYOUT_BASE)
+    _fig_rank.update_layout(
+        title_text="Classement des consommateurs par consommation annuelle",
+        xaxis_title="Consommation annuelle (kWh)",
+        height=max(45 * len(consumer_keys) + 120, 300),
+        showlegend=False,
+        hovermode="closest",
+        margin=dict(l=130, r=200, t=50, b=60),
+        xaxis=dict(gridcolor="#f1f5f9"),
+    )
+    st.plotly_chart(_fig_rank, use_container_width=True)
+    st.caption("🟢 Taux ACC ≥ 50 %   🟡 25 – 50 %   🔵 < 25 %")
+
+    # ── Tableau classement détaillé ───────────────────────────────────────────
+    with st.expander("📋 Tableau détaillé des consommateurs", expanded=True):
+        def _style_taux_ap(val):
+            if not isinstance(val, (int, float)):
+                return ""
+            if val >= 50:  return "color: #16a34a; font-weight: 600"
+            if val >= 25:  return "color: #ca8a04; font-weight: 600"
+            return "color: #dc2626"
+
+        def _style_gap(val):
+            if not isinstance(val, (int, float)):
+                return ""
+            if val > 20:  return "color: #dc2626; font-weight: 600"
+            if val > 5:   return "color: #ca8a04"
+            return "color: #16a34a"
+
+        _fmt_conso = {
+            "Conso annuelle (kWh)":     "{:,.0f}",
+            "ACC reçue (kWh)":          "{:,.0f}",
+            "Taux autoproduction (%)":  "{:.1f}",
+            "Contribution à l'ACC (%)": "{:.1f}",
+            "Puissance max (kW)":       "{:.1f}",
+            "Trous données (%)":        "{:.1f}",
+        }
+        _styled_consos = (
+            _df_consos.style
+            .map(_style_taux_ap, subset=["Taux autoproduction (%)"])
+            .map(_style_gap,     subset=["Trous données (%)"])
+            .format(_fmt_conso)
+        )
+        st.dataframe(_styled_consos, use_container_width=True)
 
 # ─── Tab 5 : Économies ────────────────────────────────────────────────────────
 
