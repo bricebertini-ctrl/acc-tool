@@ -6,12 +6,14 @@ Saisons tarifaires : Été = 1 avr – 31 oct | Hiver = 1 nov – 31 mars
 
 import datetime
 import re
+import shutil
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from io import StringIO
+from pathlib import Path
 import warnings
 
 try:
@@ -768,6 +770,28 @@ def chart_economics_monthly(eco_monthly: dict, consumer_keys: list) -> go.Figure
     return fig
 
 
+# ── Persistance des fichiers entre sessions ───────────────────────────────────
+
+_UPLOAD_ROOT = Path(__file__).parent / "uploads"
+_PROD_DIR    = _UPLOAD_ROOT / "prod"
+_CONSO_DIR   = _UPLOAD_ROOT / "conso"
+_PROD_DIR.mkdir(parents=True, exist_ok=True)
+_CONSO_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class _DiskFile:
+    """Simule un UploadedFile pour les fichiers relus depuis le disque."""
+    def __init__(self, path: Path):
+        self.name   = path.name
+        self._bytes = path.read_bytes()
+
+    def read(self) -> bytes:
+        return self._bytes
+
+    def getvalue(self) -> bytes:
+        return self._bytes
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -792,6 +816,43 @@ with st.sidebar:
         "Courbe(s) de charge consommateur(s) (.csv)",
         type="csv", accept_multiple_files=True, key="conso",
     )
+
+    # ── Persistence : sauvegarde sur disque + rechargement automatique ──────────
+    # Sauvegarde des nouveaux fichiers uploadés
+    for _uf in (prod_files or []):
+        (_PROD_DIR / _uf.name).write_bytes(_uf.getvalue())
+    for _uf in (conso_files or []):
+        (_CONSO_DIR / _uf.name).write_bytes(_uf.getvalue())
+
+    # Si l'uploader est vide → on recharge depuis le disque
+    _prod_disk  = sorted(_PROD_DIR.glob("*.csv"))
+    _conso_disk = sorted(_CONSO_DIR.glob("*.csv"))
+
+    if not prod_files and _prod_disk:
+        prod_files = [_DiskFile(p) for p in _prod_disk]
+
+    if not conso_files and _conso_disk:
+        conso_files = [_DiskFile(p) for p in _conso_disk]
+
+    # Indicateur de ce qui est chargé (disque vs uploader)
+    _nb_prod_disk  = len([f for f in (prod_files  or []) if isinstance(f, _DiskFile)])
+    _nb_conso_disk = len([f for f in (conso_files or []) if isinstance(f, _DiskFile)])
+    if _nb_prod_disk or _nb_conso_disk:
+        st.caption(
+            f"📂 Rechargé depuis la dernière session : "
+            f"{_nb_prod_disk} producteur(s), {_nb_conso_disk} consommateur(s)"
+        )
+
+    # Bouton pour effacer les fichiers sauvegardés
+    if _prod_disk or _conso_disk:
+        if st.button(
+            "🗑️ Effacer les fichiers sauvegardés",
+            help="Supprime tous les fichiers persistés sur disque",
+            use_container_width=True,
+        ):
+            shutil.rmtree(_PROD_DIR);  _PROD_DIR.mkdir()
+            shutil.rmtree(_CONSO_DIR); _CONSO_DIR.mkdir()
+            st.rerun()
 
     st.divider()
     st.markdown("**Résolution d'affichage**")
