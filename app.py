@@ -1410,9 +1410,11 @@ with tab_synth:
     st.subheader("🏘️ Panorama des consommateurs potentiels")
 
     def _prm_label(k: str) -> str:
-        """Extrait le numéro PRM du nom de fichier."""
+        """Extrait le numéro PRM du nom de fichier et le préfixe 'PRM '
+        pour que Plotly ne l'interprète pas comme un grand entier."""
         m = re.match(r"(\d{10,14})", k)
-        return m.group(1) if m else k.split("_")[0]
+        num = m.group(1) if m else k.split("_")[0]
+        return f"PRM {num}"
 
     # ── Calcul des stats individuelles ───────────────────────────────────────
     _dt_h_synth    = timestep.total_seconds() / 3600   # dt_h local au tab
@@ -1579,7 +1581,8 @@ with tab_synth:
         height=max(34 * _n_members + 100, 280),
         showlegend=False, hovermode="closest",
         xaxis=dict(title_text="ACC reçue (MWh)", gridcolor=_PRES_GRID, zeroline=False),
-        yaxis=dict(tickfont=dict(size=11)),
+        yaxis=dict(type="category", tickfont=dict(size=11), categoryorder="array",
+                   categoryarray=list(_df_bar["PRM"])),
     )
     st.plotly_chart(_fig2, use_container_width=True)
 
@@ -1616,7 +1619,7 @@ with tab_synth:
         hovermode="closest",
         legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.22,
                     font=dict(size=11, color="#475569"), bgcolor=_PRES_BG),
-        xaxis=dict(tickangle=-35, tickfont=dict(size=10), gridcolor=_PRES_GRID),
+        xaxis=dict(type="category", tickangle=-35, tickfont=dict(size=10), gridcolor=_PRES_GRID),
         yaxis=dict(title_text="Énergie (MWh)", gridcolor=_PRES_GRID),
     )
     st.plotly_chart(_fig3, use_container_width=True)
