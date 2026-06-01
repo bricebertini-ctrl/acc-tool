@@ -1077,12 +1077,13 @@ consumer_keys = _active_consumers
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab_data, tab_curves, tab_acc, tab_synth, tab_eco, tab_export = st.tabs([
+tab_data, tab_curves, tab_acc, tab_synth, tab_eco, tab_prosp, tab_export = st.tabs([
     "📋 Vérification données",
     "📈 Courbes croisées",
     "⚡ Flux ACC",
     "📊 Synthèse",
     "💰 Économies",
+    "🎯 Prospection",
     "📄 Export PPTX",
 ])
 
@@ -1929,6 +1930,241 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)** issus du c
     st.plotly_chart(fig_proj, use_container_width=True)
 
 # ─── Tab 6 : Export PPTX ─────────────────────────────────────────────────────
+
+# ─── Tab 6 : Prospection ─────────────────────────────────────────────────────
+
+with tab_prosp:
+    st.subheader("🎯 État de la prospection")
+
+    _prosp_file = st.file_uploader(
+        "Fichier de prospection (.xlsx)",
+        type=["xlsx", "xls"],
+        key="prosp_file",
+        help="Tableau Excel avec colonnes : Raison sociale, Type de structure, estimation Conso, prise de contact…",
+    )
+
+    # Persistance du fichier prospection (même logique que courbes de charge)
+    _prosp_store = _get_file_store().setdefault("prosp", {})
+    if _prosp_file:
+        _prosp_store[_prosp_file.name] = _prosp_file.getvalue()
+    _prosp_bytes = next(iter(_prosp_store.values()), None) if _prosp_store else None
+
+    if _prosp_bytes is None:
+        st.info("Chargez votre fichier de prospection pour afficher le tableau de bord.", icon="📂")
+        st.stop()
+
+    # ── Chargement et nettoyage ───────────────────────────────────────────────
+    _df_p = pd.read_excel(pd.io.common.BytesIO(_prosp_bytes))
+    _df_p.columns = [str(c).strip() for c in _df_p.columns]
+
+    # Colonnes canoniques (tolérantes aux variantes de nommage)
+    def _find_col(df, *candidates):
+        for c in candidates:
+            for col in df.columns:
+                if c.lower() in col.lower():
+                    return col
+        return None
+
+    _col_nom     = _find_col(_df_p, "raison", "nom", "société", "entreprise")
+    _col_type    = _find_col(_df_p, "type de structure", "type", "structure")
+    _col_commune = _find_col(_df_p, "commune", "ville", "city")
+    _col_conso   = _find_col(_df_p, "estimation conso", "conso steven", "conso", "mwh")
+    _col_contact = _find_col(_df_p, "prise de contact", "contact")
+    _col_relance = _find_col(_df_p, "relance")
+    _col_prm     = _find_col(_df_p, "prm", "pdl")
+    _col_comment = _find_col(_df_p, "commentaire", "comment")
+    _col_etapes  = _find_col(_df_p, "étapes suivantes", "etapes", "next")
+    _col_prio    = _find_col(_df_p, "priorité", "priorite", "prio")
+
+    # Statut de chaque prospect (dérivé des colonnes disponibles)
+    def _statut(row):
+        if _col_prm and pd.notna(row.get(_col_prm, None)) and str(row.get(_col_prm, "")).strip():
+            return "✅ PRM collecté"
+        if _col_relance and pd.notna(row.get(_col_relance, None)):
+            return "🔄 Relance"
+        if _col_contact and str(row.get(_col_contact, "")).strip().lower() in ("oui", "yes", "1", "true"):
+            return "📬 Contacté"
+        return "⏳ À contacter"
+
+    _df_p["_statut"] = _df_p.apply(_statut, axis=1)
+
+    _statut_order = {"✅ PRM collecté": 0, "🔄 Relance": 1, "📬 Contacté": 2, "⏳ À contacter": 3}
+    _statut_colors = {
+        "✅ PRM collecté": "#16a34a",
+        "🔄 Relance":      "#2563eb",
+        "📬 Contacté":     "#ca8a04",
+        "⏳ À contacter":  "#94a3b8",
+    }
+
+    # ── KPIs ─────────────────────────────────────────────────────────────────
+    _n_total     = len(_df_p)
+    _n_contactes = (_df_p["_statut"] != "⏳ À contacter").sum()
+    _n_prm       = (_df_p["_statut"] == "✅ PRM collecté").sum()
+    _conso_est   = _df_p[_col_conso].apply(pd.to_numeric, errors="coerce").sum() if _col_conso else 0
+
+    _kp1, _kp2, _kp3, _kp4 = st.columns(4)
+    with _kp1:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value kpi-blue">{_n_total}</div>'
+                    f'<div class="kpi-label">Prospects identifiés</div></div>', unsafe_allow_html=True)
+    with _kp2:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value kpi-orange">{_n_contactes}</div>'
+                    f'<div class="kpi-label">Contactés / en cours</div></div>', unsafe_allow_html=True)
+    with _kp3:
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value kpi-green">{_n_prm}</div>'
+                    f'<div class="kpi-label">PRM collectés</div></div>', unsafe_allow_html=True)
+    with _kp4:
+        _conso_label = f"{_conso_est:,.0f} MWh" if _conso_est > 0 else "N/A"
+        st.markdown(f'<div class="kpi-box"><div class="kpi-value kpi-purple">{_conso_label}</div>'
+                    f'<div class="kpi-label">Conso estimée (membres)</div></div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Graphiques côte à côte ────────────────────────────────────────────────
+    _gcol1, _gcol2 = st.columns([3, 2])
+
+    # G1 — Répartition par type de structure
+    with _gcol1:
+        if _col_type:
+            _type_counts = _df_p[_col_type].fillna("Non renseigné").value_counts()
+            _fig_types = go.Figure(go.Bar(
+                x=_type_counts.values,
+                y=_type_counts.index,
+                orientation="h",
+                marker=dict(
+                    color=[
+                        "#2563eb","#16a34a","#f59e0b","#7c3aed","#0891b2",
+                        "#db2777","#ea580c","#65a30d","#0284c7","#94a3b8",
+                    ][:len(_type_counts)],
+                    opacity=0.85,
+                ),
+                text=_type_counts.values,
+                textposition="outside",
+                hovertemplate="<b>%{y}</b> : %{x} prospects<extra></extra>",
+            ))
+            _fig_types.update_layout(
+                paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+                font=dict(family="Inter, Arial, sans-serif", size=12, color="#1e293b"),
+                title=dict(text="Prospects par type de structure", font=dict(size=14, color="#1e3a5f"),
+                           x=0.5, xanchor="center"),
+                margin=dict(l=140, r=60, t=50, b=40),
+                height=max(35 * len(_type_counts) + 80, 200),
+                showlegend=False, hovermode="closest",
+                xaxis=dict(gridcolor="#e2e8f0", zeroline=False),
+                yaxis=dict(type="category", tickfont=dict(size=11)),
+            )
+            st.plotly_chart(_fig_types, use_container_width=True)
+
+    # G2 — Pipeline statut (funnel)
+    with _gcol2:
+        _statut_counts = _df_p["_statut"].value_counts()
+        _statut_sorted = sorted(_statut_counts.items(), key=lambda x: _statut_order.get(x[0], 9))
+        _s_labels = [s for s, _ in _statut_sorted]
+        _s_values = [v for _, v in _statut_sorted]
+        _s_colors = [_statut_colors.get(s, "#94a3b8") for s in _s_labels]
+
+        _fig_statut = go.Figure(go.Bar(
+            x=_s_values,
+            y=_s_labels,
+            orientation="h",
+            marker=dict(color=_s_colors, opacity=0.85),
+            text=_s_values,
+            textposition="outside",
+            hovertemplate="<b>%{y}</b> : %{x}<extra></extra>",
+        ))
+        _fig_statut.update_layout(
+            paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+            font=dict(family="Inter, Arial, sans-serif", size=12, color="#1e293b"),
+            title=dict(text="Pipeline de prospection", font=dict(size=14, color="#1e3a5f"),
+                       x=0.5, xanchor="center"),
+            margin=dict(l=140, r=60, t=50, b=40),
+            height=220,
+            showlegend=False, hovermode="closest",
+            xaxis=dict(gridcolor="#e2e8f0", zeroline=False),
+            yaxis=dict(type="category", tickfont=dict(size=12)),
+        )
+        st.plotly_chart(_fig_statut, use_container_width=True)
+
+    # ── Tableau des prospects ─────────────────────────────────────────────────
+    st.subheader("Liste des prospects")
+
+    # Filtres
+    _fcol1, _fcol2, _fcol3 = st.columns(3)
+    with _fcol1:
+        if _col_type:
+            _types_dispo = ["Tous"] + sorted(_df_p[_col_type].dropna().unique().tolist())
+            _filtre_type = st.selectbox("Type de structure", _types_dispo, key="prosp_type")
+        else:
+            _filtre_type = "Tous"
+    with _fcol2:
+        _statuts_dispo = ["Tous"] + list(_statut_order.keys())
+        _filtre_statut = st.selectbox("Statut", _statuts_dispo, key="prosp_statut")
+    with _fcol3:
+        _sort_by = st.selectbox(
+            "Trier par",
+            (["Consommation estimée (↓)"] if _col_conso else []) + ["Statut", "Nom"],
+            key="prosp_sort",
+        )
+
+    # Application des filtres
+    _df_view = _df_p.copy()
+    if _filtre_type != "Tous" and _col_type:
+        _df_view = _df_view[_df_view[_col_type] == _filtre_type]
+    if _filtre_statut != "Tous":
+        _df_view = _df_view[_df_view["_statut"] == _filtre_statut]
+
+    # Tri
+    if _sort_by == "Consommation estimée (↓)" and _col_conso:
+        _df_view = _df_view.copy()
+        _df_view["_conso_num"] = pd.to_numeric(_df_view[_col_conso], errors="coerce")
+        _df_view = _df_view.sort_values("_conso_num", ascending=False).drop(columns=["_conso_num"])
+    elif _sort_by == "Statut":
+        _df_view["_statut_rank"] = _df_view["_statut"].map(_statut_order)
+        _df_view = _df_view.sort_values("_statut_rank").drop(columns=["_statut_rank"])
+    elif _sort_by == "Nom" and _col_nom:
+        _df_view = _df_view.sort_values(_col_nom)
+
+    # Colonnes à afficher (celles qui existent)
+    _display_cols = {"Statut": "_statut"}
+    if _col_nom:     _display_cols[_col_nom]     = _col_nom
+    if _col_type:    _display_cols[_col_type]    = _col_type
+    if _col_commune: _display_cols[_col_commune] = _col_commune
+    if _col_conso:   _display_cols[_col_conso]   = _col_conso
+    if _col_prm:     _display_cols[_col_prm]     = _col_prm
+    if _col_relance: _display_cols[_col_relance] = _col_relance
+    if _col_comment: _display_cols[_col_comment] = _col_comment
+    if _col_etapes:  _display_cols[_col_etapes]  = _col_etapes
+
+    _df_table = _df_view[list(dict.fromkeys(_display_cols.values()))].rename(
+        columns={"_statut": "Statut"}
+    ).reset_index(drop=True)
+    _df_table.index += 1
+
+    def _color_statut_row(row):
+        s = row.get("Statut", "")
+        bg = {"✅ PRM collecté": "#f0fdf4", "🔄 Relance": "#eff6ff",
+              "📬 Contacté": "#fffbeb", "⏳ À contacter": "#f8fafc"}.get(s, "")
+        return [f"background-color: {bg}" for _ in row]
+
+    _styled_prosp = _df_table.style.apply(_color_statut_row, axis=1)
+    st.dataframe(_styled_prosp, use_container_width=True, height=min(600, 38 * len(_df_table) + 40))
+
+    # ── Lien avec les données chargées ────────────────────────────────────────
+    if _col_prm and _n_prm > 0:
+        st.divider()
+        st.markdown("**🔗 Correspondance PRM ↔ courbes de charge chargées**")
+        _prm_loaded = set()
+        for _k in consumer_keys:
+            _m = re.match(r"(\d{10,14})", _k)
+            if _m:
+                _prm_loaded.add(_m.group(1))
+        _prm_prosp = _df_p[_col_prm].dropna().astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+        _matches = _prm_prosp[_prm_prosp.isin(_prm_loaded)]
+        if not _matches.empty:
+            st.success(f"✅ {len(_matches)} prospect(s) avec courbe de charge chargée : {', '.join(_matches.values)}")
+        else:
+            st.info("Aucun PRM du fichier de prospection ne correspond aux courbes chargées.")
+
+# ─── Tab 7 : Export PPTX ─────────────────────────────────────────────────────
 
 with tab_export:
     st.subheader("Générer la proposition commerciale (PowerPoint)")
