@@ -780,16 +780,25 @@ _CONSO_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class _DiskFile:
-    """Simule un UploadedFile pour les fichiers relus depuis le disque."""
-    def __init__(self, path: Path):
-        self.name   = path.name
-        self._bytes = path.read_bytes()
+    """Simule un UploadedFile à partir d'un nom et de bytes."""
+    def __init__(self, name: str, data: bytes):
+        self.name   = name
+        self._bytes = data
 
     def read(self) -> bytes:
         return self._bytes
 
     def getvalue(self) -> bytes:
         return self._bytes
+
+
+@st.cache_resource
+def _get_file_store() -> dict:
+    """
+    Store persistant côté serveur — survit aux rechargements de page (F5)
+    car le process Python reste actif. Contient {"prod": {name: bytes}, "conso": {...}}.
+    """
+    return {"prod": {}, "conso": {}}
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -817,39 +826,53 @@ with st.sidebar:
         type="csv", accept_multiple_files=True, key="conso",
     )
 
-    # ── Persistence : sauvegarde sur disque + rechargement automatique ──────────
-    # Sauvegarde des nouveaux fichiers uploadés
+    # ── Persistence : cache mémoire (F5) + disque (restart) ──────────────────
+    _store = _get_file_store()
+
+    # 1. Sauvegarder les nouveaux fichiers uploadés (mémoire + disque)
     for _uf in (prod_files or []):
-        (_PROD_DIR / _uf.name).write_bytes(_uf.getvalue())
+        _b = _uf.getvalue()
+        _store["prod"][_uf.name] = _b
+        try: (_PROD_DIR / _uf.name).write_bytes(_b)
+        except Exception: pass
     for _uf in (conso_files or []):
-        (_CONSO_DIR / _uf.name).write_bytes(_uf.getvalue())
+        _b = _uf.getvalue()
+        _store["conso"][_uf.name] = _b
+        try: (_CONSO_DIR / _uf.name).write_bytes(_b)
+        except Exception: pass
 
-    # Si l'uploader est vide → on recharge depuis le disque
-    _prod_disk  = sorted(_PROD_DIR.glob("*.csv"))
-    _conso_disk = sorted(_CONSO_DIR.glob("*.csv"))
+    # 2. Si uploader vide → restaurer depuis le cache mémoire
+    if not prod_files and _store["prod"]:
+        prod_files = [_DiskFile(n, b) for n, b in _store["prod"].items()]
+    if not conso_files and _store["conso"]:
+        conso_files = [_DiskFile(n, b) for n, b in _store["conso"].items()]
 
-    if not prod_files and _prod_disk:
-        prod_files = [_DiskFile(p) for p in _prod_disk]
+    # 3. Si cache mémoire vide aussi → essayer le disque (après redémarrage serveur)
+    if not prod_files:
+        _from_disk = sorted(_PROD_DIR.glob("*.csv"))
+        if _from_disk:
+            prod_files = [_DiskFile(p.name, p.read_bytes()) for p in _from_disk]
+            for f in prod_files: _store["prod"][f.name] = f.getvalue()
+    if not conso_files:
+        _from_disk = sorted(_CONSO_DIR.glob("*.csv"))
+        if _from_disk:
+            conso_files = [_DiskFile(p.name, p.read_bytes()) for p in _from_disk]
+            for f in conso_files: _store["conso"][f.name] = f.getvalue()
 
-    if not conso_files and _conso_disk:
-        conso_files = [_DiskFile(p) for p in _conso_disk]
+    # 4. Indicateur
+    _nb_restored = len([f for f in (prod_files or []) + (conso_files or []) if isinstance(f, _DiskFile)])
+    if _nb_restored:
+        _np = len([f for f in (prod_files or []) if isinstance(f, _DiskFile)])
+        _nc = len([f for f in (conso_files or []) if isinstance(f, _DiskFile)])
+        st.caption(f"📂 Session restaurée : {_np} producteur(s) · {_nc} consommateur(s)")
 
-    # Indicateur de ce qui est chargé (disque vs uploader)
-    _nb_prod_disk  = len([f for f in (prod_files  or []) if isinstance(f, _DiskFile)])
-    _nb_conso_disk = len([f for f in (conso_files or []) if isinstance(f, _DiskFile)])
-    if _nb_prod_disk or _nb_conso_disk:
-        st.caption(
-            f"📂 Rechargé depuis la dernière session : "
-            f"{_nb_prod_disk} producteur(s), {_nb_conso_disk} consommateur(s)"
-        )
-
-    # Bouton pour effacer les fichiers sauvegardés
-    if _prod_disk or _conso_disk:
-        if st.button(
-            "🗑️ Effacer les fichiers sauvegardés",
-            help="Supprime tous les fichiers persistés sur disque",
-            use_container_width=True,
-        ):
+    # 5. Bouton vider
+    if _store["prod"] or _store["conso"]:
+        if st.button("🗑️ Effacer les fichiers sauvegardés",
+                     help="Repart de zéro (vide le cache et le disque)",
+                     use_container_width=True):
+            _store["prod"].clear()
+            _store["conso"].clear()
             shutil.rmtree(_PROD_DIR);  _PROD_DIR.mkdir()
             shutil.rmtree(_CONSO_DIR); _CONSO_DIR.mkdir()
             st.rerun()
