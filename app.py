@@ -1464,58 +1464,190 @@ with tab_synth:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Bar chart horizontal — classement consommation ────────────────────────
-    _df_sorted_bar = _df_consos.sort_values("Conso annuelle (kWh)", ascending=True)
+    # Palette présentation (fond blanc partout pour pouvoir screener)
+    _PRES_BG    = "#ffffff"
+    _PRES_FONT  = dict(family="Inter, Arial, sans-serif", size=13, color="#1e293b")
+    _PRES_GRID  = "#e2e8f0"
+    _C_GREEN    = "#16a34a"
+    _C_ORANGE   = "#f59e0b"
+    _C_BLUE     = "#2563eb"
+    _C_LIGHT    = "#f1f5f9"
 
-    def _taux_bar_color(t: float) -> str:
-        if t >= 50:  return "#16a34a"
-        if t >= 25:  return "#ca8a04"
-        return "#2563eb"
+    def _pres_layout(fig, title="", h=420, ml=140, mr=160, mt=60, mb=60):
+        """Applique un style présentation propre (fond blanc, pas de hovermode x)."""
+        fig.update_layout(
+            paper_bgcolor=_PRES_BG, plot_bgcolor=_PRES_BG,
+            font=_PRES_FONT,
+            title=dict(text=title, font=dict(size=15, color="#1e3a5f"), x=0.5, xanchor="center"),
+            margin=dict(l=ml, r=mr, t=mt, b=mb),
+            height=h,
+            hovermode="closest",
+            showlegend=False,
+        )
 
-    _bar_colors = [_taux_bar_color(t) for t in _df_sorted_bar["Taux autoproduction (%)"]]
-    _bar_texts  = [
-        f"  {v/1000:.1f} MWh · {t:.0f} % ACC"
-        for v, t in zip(_df_sorted_bar["Conso annuelle (kWh)"], _df_sorted_bar["Taux autoproduction (%)"])
-    ]
+    def _taux_color(t: float) -> str:
+        if t >= 50: return _C_GREEN
+        if t >= 25: return _C_ORANGE
+        return _C_BLUE
 
-    _fig_rank = go.Figure()
-    _fig_rank.add_trace(go.Bar(
-        y=_df_sorted_bar["PRM"],
-        x=_df_sorted_bar["Conso annuelle (kWh)"],
+    # ════════════════════════════════════════════════════════════════════════
+    # GRAPHIQUE 1 – Classement horizontal par consommation annuelle
+    # ════════════════════════════════════════════════════════════════════════
+    _df_bar = _df_consos.sort_values("Conso annuelle (kWh)", ascending=True).copy()
+    _df_bar["_conso_mwh"] = _df_bar["Conso annuelle (kWh)"] / 1000
+
+    _fig1 = go.Figure()
+    # Barres colorées par taux ACC
+    _fig1.add_trace(go.Bar(
+        y=_df_bar["PRM"],
+        x=_df_bar["_conso_mwh"],
         orientation="h",
-        marker_color=_bar_colors,
-        text=_bar_texts,
+        marker=dict(
+            color=[_taux_color(t) for t in _df_bar["Taux autoproduction (%)"]],
+            opacity=0.88,
+            line=dict(color=_PRES_BG, width=1),
+        ),
+        text=[f"  {v:.1f} MWh" for v in _df_bar["_conso_mwh"]],
         textposition="outside",
         cliponaxis=False,
-        hovertemplate="<b>PRM %{y}</b><br>Conso : %{x:,.0f} kWh<extra></extra>",
+        customdata=_df_bar[["Taux autoproduction (%)", "ACC reçue (kWh)"]].values,
+        hovertemplate=(
+            "<b>PRM %{y}</b><br>"
+            "Conso : %{x:.1f} MWh<br>"
+            "Taux ACC : %{customdata[0]:.1f} %<br>"
+            "ACC reçue : %{customdata[1]:,.0f} kWh<extra></extra>"
+        ),
     ))
-    _fig_rank.update_layout(**LAYOUT_BASE)
-    _fig_rank.update_layout(
-        title_text="Classement des consommateurs par consommation annuelle",
-        xaxis_title="Consommation annuelle (kWh)",
-        height=max(45 * len(consumer_keys) + 120, 300),
-        showlegend=False,
-        hovermode="closest",
-        margin=dict(l=130, r=200, t=50, b=60),
-        xaxis=dict(gridcolor="#f1f5f9"),
-    )
-    st.plotly_chart(_fig_rank, use_container_width=True)
-    st.caption("🟢 Taux ACC ≥ 50 %   🟡 25 – 50 %   🔵 < 25 %")
+    # Annotations taux ACC en bout de barre
+    for _, row in _df_bar.iterrows():
+        _fig1.add_annotation(
+            x=row["_conso_mwh"], y=row["PRM"],
+            xanchor="left", yanchor="middle",
+            text=f"   <b>{row['Taux autoproduction (%)']:.0f} %</b> ACC",
+            font=dict(size=11, color=_taux_color(row["Taux autoproduction (%)"])),
+            showarrow=False, xref="x", yref="y",
+        )
+    _pres_layout(_fig1, "Consommation annuelle et taux d'autoconsommation par membre",
+                 h=max(34 * len(consumer_keys) + 100, 280), ml=120, mr=170, mt=60, mb=50)
+    _fig1.update_xaxes(title_text="Consommation annuelle (MWh)", gridcolor=_PRES_GRID, zeroline=False)
+    _fig1.update_yaxes(tickfont=dict(size=11))
+    st.plotly_chart(_fig1, use_container_width=True)
+    st.caption("Couleur = taux d'autoconsommation  ·  🟢 ≥ 50 %   🟡 25 – 50 %   🔵 < 25 %")
 
-    # ── Tableau classement détaillé ───────────────────────────────────────────
-    with st.expander("📋 Tableau détaillé des consommateurs", expanded=True):
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # GRAPHIQUES 2 + 3 côte à côte
+    # ════════════════════════════════════════════════════════════════════════
+    _col_scatter, _col_donut = st.columns([3, 2])
+
+    # ── GRAPHIQUE 2 : Carte des membres (scatter conso / taux ACC) ───────────
+    with _col_scatter:
+        _sizes = [max(12, (c / _df_consos["Conso annuelle (kWh)"].max()) * 55)
+                  for c in _df_consos["Conso annuelle (kWh)"]]
+
+        _fig2 = go.Figure()
+        # Zones de fond (quadrants)
+        _x_mid = _df_consos["Conso annuelle (kWh)"].median() / 1000
+        _fig2.add_vrect(x0=0, x1=_x_mid, fillcolor="#f0fdf4", opacity=0.3, line_width=0, layer="below")
+        _fig2.add_vrect(x0=_x_mid, x1=_df_consos["Conso annuelle (kWh)"].max()*1.15/1000,
+                        fillcolor="#eff6ff", opacity=0.3, line_width=0, layer="below")
+        _fig2.add_hline(y=50, line=dict(color="#16a34a", width=1, dash="dot"), opacity=0.5)
+        _fig2.add_hline(y=25, line=dict(color="#f59e0b", width=1, dash="dot"), opacity=0.5)
+        _fig2.add_vline(x=_x_mid, line=dict(color="#94a3b8", width=1, dash="dot"), opacity=0.5)
+
+        _fig2.add_trace(go.Scatter(
+            x=_df_consos["Conso annuelle (kWh)"] / 1000,
+            y=_df_consos["Taux autoproduction (%)"],
+            mode="markers+text",
+            text=_df_consos["PRM"],
+            textposition="top center",
+            textfont=dict(size=9, color="#475569"),
+            marker=dict(
+                size=_sizes,
+                color=[_taux_color(t) for t in _df_consos["Taux autoproduction (%)"]],
+                opacity=0.80,
+                line=dict(color=_PRES_BG, width=2),
+            ),
+            customdata=_df_consos[["Contribution à l'ACC (%)", "ACC reçue (kWh)"]].values,
+            hovertemplate=(
+                "<b>PRM %{text}</b><br>"
+                "Conso : %{x:.1f} MWh<br>"
+                "Taux ACC : %{y:.1f} %<br>"
+                "Contribution : %{customdata[0]:.1f} %<extra></extra>"
+            ),
+        ))
+        _pres_layout(_fig2, "Carte des membres — Conso vs taux d'autoconsommation",
+                     h=400, ml=60, mr=30, mt=60, mb=60)
+        _fig2.update_xaxes(title_text="Consommation annuelle (MWh)", gridcolor=_PRES_GRID, zeroline=False)
+        _fig2.update_yaxes(title_text="Taux autoproduction (%)", gridcolor=_PRES_GRID,
+                           range=[-5, max(105, _df_consos["Taux autoproduction (%)"].max() + 10)])
+        # Annotations quadrants
+        _fig2.add_annotation(x=_x_mid * 0.5, y=102, text="Petits · bon ACC", showarrow=False,
+                              font=dict(size=9, color="#64748b"), xref="x", yref="y")
+        _fig2.add_annotation(x=_df_consos["Conso annuelle (kWh)"].max()*0.8/1000, y=102,
+                              text="Gros · bon ACC ⭐", showarrow=False,
+                              font=dict(size=9, color="#16a34a"), xref="x", yref="y")
+        st.plotly_chart(_fig2, use_container_width=True)
+
+    # ── GRAPHIQUE 3 : Donut répartition de la consommation totale ────────────
+    with _col_donut:
+        # Palette discrète (max 31 consommateurs)
+        _donut_palette = [
+            "#2563eb","#16a34a","#f59e0b","#7c3aed","#0891b2","#db2777","#ea580c",
+            "#65a30d","#0284c7","#9333ea","#b91c1c","#0d9488","#c2410c","#4f46e5",
+            "#15803d","#d97706","#6d28d9","#0369a1","#be123c","#047857","#7e22ce",
+            "#1d4ed8","#b45309","#0f766e","#9f1239","#166534","#6b21a8","#1e40af",
+            "#92400e","#065f46","#581c87",
+        ]
+        _df_donut = _df_consos.sort_values("Conso annuelle (kWh)", ascending=False)
+        _fig3 = go.Figure(go.Pie(
+            labels=_df_donut["PRM"],
+            values=_df_donut["Conso annuelle (kWh)"],
+            hole=0.52,
+            marker=dict(
+                colors=_donut_palette[:len(_df_donut)],
+                line=dict(color=_PRES_BG, width=2),
+            ),
+            textinfo="percent",
+            textfont=dict(size=10),
+            hovertemplate="<b>PRM %{label}</b><br>%{value:,.0f} kWh<br>%{percent}<extra></extra>",
+            sort=False,
+        ))
+        _fig3.update_layout(
+            paper_bgcolor=_PRES_BG,
+            font=_PRES_FONT,
+            title=dict(text="Répartition de la consommation", font=dict(size=14, color="#1e3a5f"),
+                       x=0.5, xanchor="center"),
+            margin=dict(l=10, r=10, t=55, b=10),
+            height=400,
+            showlegend=True,
+            legend=dict(
+                orientation="v", x=1.01, y=0.5, xanchor="left", yanchor="middle",
+                font=dict(size=9, color="#475569"),
+                bgcolor=_PRES_BG,
+            ),
+            annotations=[dict(
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                text=f"<b>{len(_df_donut)}</b><br><span style='font-size:10px'>membres</span>",
+                showarrow=False, align="center",
+                font=dict(size=20, color="#1e3a5f"),
+            )],
+        )
+        st.plotly_chart(_fig3, use_container_width=True)
+
+    # ── Tableau détaillé (repliable) ─────────────────────────────────────────
+    with st.expander("📋 Tableau détaillé des consommateurs"):
         def _style_taux_ap(val):
-            if not isinstance(val, (int, float)):
-                return ""
-            if val >= 50:  return "color: #16a34a; font-weight: 600"
-            if val >= 25:  return "color: #ca8a04; font-weight: 600"
+            if not isinstance(val, (int, float)): return ""
+            if val >= 50: return "color: #16a34a; font-weight: 600"
+            if val >= 25: return "color: #ca8a04; font-weight: 600"
             return "color: #dc2626"
 
         def _style_gap(val):
-            if not isinstance(val, (int, float)):
-                return ""
-            if val > 20:  return "color: #dc2626; font-weight: 600"
-            if val > 5:   return "color: #ca8a04"
+            if not isinstance(val, (int, float)): return ""
+            if val > 20: return "color: #dc2626; font-weight: 600"
+            if val > 5:  return "color: #ca8a04"
             return "color: #16a34a"
 
         _fmt_conso = {
