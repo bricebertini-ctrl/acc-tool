@@ -1551,27 +1551,20 @@ with tab_synth:
         x=_df_bar["ACC reçue (MWh)"],
         orientation="h",
         marker=dict(color=_C_ACC, opacity=0.85, line=dict(color=_PRES_BG, width=1)),
-        text=[f"  {v:.1f} MWh" for v in _df_bar["ACC reçue (MWh)"]],
+        text=[
+            f"  {v:.1f} MWh  ·  {p:.1f} % prod."
+            for v, p in zip(_df_bar["ACC reçue (MWh)"], _df_bar["% production absorbée"])
+        ],
         textposition="outside",
         cliponaxis=False,
         customdata=_df_bar[["% production absorbée", "Taux autoproduction (%)"]].values,
         hovertemplate=(
-            "<b>PRM %{y}</b><br>"
+            "<b>%{y}</b><br>"
             "ACC reçue : %{x:.1f} MWh<br>"
             "% de ma production : %{customdata[0]:.1f} %<br>"
             "Taux autoprod membre : %{customdata[1]:.1f} %<extra></extra>"
         ),
     ))
-    # Annotation "% de la production" en bout de barre
-    for _, row in _df_bar.iterrows():
-        if row["ACC reçue (MWh)"] > 0:
-            _fig2.add_annotation(
-                x=row["ACC reçue (MWh)"], y=row["PRM"],
-                xanchor="left", yanchor="middle",
-                text=f"   {row['% production absorbée']:.1f} % de ma prod.",
-                font=dict(size=10, color="#64748b"),
-                showarrow=False, xref="x", yref="y",
-            )
     _fig2.update_layout(
         paper_bgcolor=_PRES_BG, plot_bgcolor=_PRES_BG,
         font=_PRES_FONT,
