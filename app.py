@@ -1075,6 +1075,52 @@ with st.spinner("Calcul ACC…"):
 
 consumer_keys = _active_consumers
 
+# ── Mapping PRM → label client/bâtiment (calculé avant les onglets) ──────────
+# Doit tourner AVANT tab_synth pour que _prm_label() ait les données disponibles.
+
+def _parse_pdlclient_bytes(xls_bytes: bytes) -> dict:
+    """Parse la feuille pdlclient d'un Excel → {prm: {client, location, label}}."""
+    try:
+        xl = pd.ExcelFile(pd.io.common.BytesIO(xls_bytes))
+        if "pdlclient" not in xl.sheet_names:
+            return {}
+        df_pdl = xl.parse("pdlclient")
+        df_pdl.columns = [str(c).strip() for c in df_pdl.columns]
+        col_rs  = next((c for c in df_pdl.columns if "raison" in c.lower() or "nom" in c.lower()), None)
+        col_pdl = next((c for c in df_pdl.columns if "pdl" in c.lower() or "prm" in c.lower()), None)
+        if not col_rs or not col_pdl:
+            return {}
+        mapping = {}
+        for _, row in df_pdl.iterrows():
+            client  = str(row[col_rs]).strip()
+            pdl_val = str(row[col_pdl]).strip()
+            if not pdl_val or pdl_val.lower() == "nan":
+                continue
+            if "\n" in pdl_val:
+                for line in pdl_val.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(None, 1)
+                    if not parts:
+                        continue
+                    prm = parts[0].strip()
+                    loc = parts[1].strip() if len(parts) > 1 else ""
+                    label = loc[:28] if loc else client[:28]
+                    mapping[prm] = {"client": client, "location": loc, "label": label}
+            else:
+                prm = re.sub(r"\.0$", "", pdl_val.replace(" ", ""))
+                if prm:
+                    mapping[prm] = {"client": client, "location": "", "label": client[:28]}
+        return mapping
+    except Exception:
+        return {}
+
+# Reconstruit le mapping à chaque rerun si un fichier prospection est en store
+_prosp_bytes_early = next(iter(_get_file_store().get("prosp", {}).values()), None)
+if _prosp_bytes_early:
+    _get_file_store()["prm_labels"] = _parse_pdlclient_bytes(_prosp_bytes_early)
+
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 tab_data, tab_curves, tab_acc, tab_synth, tab_eco, tab_prosp, tab_export = st.tabs([
@@ -1962,47 +2008,8 @@ with tab_prosp:
     _df_p = _xl_prosp.parse(_xl_prosp.sheet_names[0])
     _df_p.columns = [str(c).strip() for c in _df_p.columns]
 
-    # ── Feuille pdlclient → mapping PRM → label client/bâtiment ─────────────
-    def _parse_pdlclient(xl):
-        """Retourne {prm_str: label_court} depuis la feuille pdlclient si elle existe."""
-        if "pdlclient" not in xl.sheet_names:
-            return {}
-        df_pdl = xl.parse("pdlclient")
-        df_pdl.columns = [str(c).strip() for c in df_pdl.columns]
-        col_rs  = next((c for c in df_pdl.columns if "raison" in c.lower() or "nom" in c.lower()), None)
-        col_pdl = next((c for c in df_pdl.columns if "pdl" in c.lower() or "prm" in c.lower()), None)
-        if not col_rs or not col_pdl:
-            return {}
-        mapping = {}
-        for _, row in df_pdl.iterrows():
-            client  = str(row[col_rs]).strip()
-            pdl_val = str(row[col_pdl]).strip()
-            if not pdl_val or pdl_val.lower() == "nan":
-                continue
-            if "\n" in pdl_val:
-                # Cellule multi-PRM : "12261215546658    ESPACE LIBERTE\n..."
-                for line in pdl_val.split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split(None, 1)
-                    if not parts:
-                        continue
-                    prm = parts[0].strip()
-                    loc = parts[1].strip() if len(parts) > 1 else ""
-                    # Label court : "Bâtiment (20 car max)"
-                    label = loc[:28] if loc else client[:28]
-                    mapping[prm] = {"client": client, "location": loc, "label": label}
-            else:
-                # PRM unique
-                prm = re.sub(r"\.0$", "", pdl_val.replace(" ", ""))
-                if prm:
-                    mapping[prm] = {"client": client, "location": "", "label": client[:28]}
-        return mapping
-
-    _prm_labels_map = _parse_pdlclient(_xl_prosp)
-    # Persistance du mapping pour les autres onglets (Synthèse)
-    _get_file_store()["prm_labels"] = _prm_labels_map
+    # Mapping déjà construit avant les onglets — on le récupère simplement
+    _prm_labels_map = _get_file_store().get("prm_labels", {})
 
     # Colonnes canoniques (tolérantes aux variantes de nommage)
     def _find_col(df, *candidates):
