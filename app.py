@@ -2017,6 +2017,21 @@ with tab_prosp:
     # Mapping déjà construit avant les onglets — on le récupère simplement
     _prm_labels_map = _get_file_store().get("prm_labels", {})
 
+    # ── Debug mapping ────────────────────────────────────────────────────────
+    with st.expander("🔍 Debug mapping PRM → noms (à supprimer après vérification)"):
+        st.write("**Feuilles dans le fichier Excel :**", _xl_prosp.sheet_names)
+        if "pdlclient" in _xl_prosp.sheet_names:
+            _df_debug = _xl_prosp.parse("pdlclient")
+            st.write(f"**Feuille pdlclient** — {len(_df_debug)} lignes, colonnes : {list(_df_debug.columns)}")
+            st.dataframe(_df_debug.astype(str).head(10))
+        else:
+            st.error("❌ Feuille 'pdlclient' introuvable dans le fichier !")
+        st.write(f"**Mapping construit** : {len(_prm_labels_map)} entrées")
+        if _prm_labels_map:
+            st.write(dict(list(_prm_labels_map.items())[:5]))
+        else:
+            st.warning("⚠️ Mapping vide — vérifie que le fichier uploadé dans la sidebar est bien le bon.")
+
     # Colonnes canoniques (tolérantes aux variantes de nommage)
     def _find_col(df, *candidates):
         for c in candidates:
