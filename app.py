@@ -989,6 +989,21 @@ with st.sidebar:
     st.divider()
     st.caption("💡 Les courbes peuvent avoir des pas de temps différents — elles seront automatiquement rééchantillonnées au pas le plus fin.")
 
+    # ── Fichier de prospection (dans la sidebar pour s'exécuter AVANT les onglets)
+    st.divider()
+    st.markdown("**5 · Prospection (optionnel)**")
+    _prosp_file_sidebar = st.file_uploader(
+        "Tableau de prospection (.xlsx)",
+        type=["xlsx", "xls"],
+        key="prosp_file",
+        help="Active l'onglet Prospection et remplace les PRM par les noms clients dans les graphiques.",
+    )
+    _prosp_store_sb = _get_file_store().setdefault("prosp", {})
+    if _prosp_file_sidebar:
+        _prosp_store_sb[_prosp_file_sidebar.name] = _prosp_file_sidebar.getvalue()
+    if _prosp_store_sb:
+        st.caption(f"📂 {next(iter(_prosp_store_sb))} chargé")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -1985,22 +2000,13 @@ Le calcul porte **uniquement sur les volumes autoconsommés (E_ACC)** issus du c
 
 with tab_prosp:
     st.subheader("🎯 État de la prospection")
+    st.caption("Chargez le fichier de prospection via la barre latérale (section 5).")
 
-    _prosp_file = st.file_uploader(
-        "Fichier de prospection (.xlsx)",
-        type=["xlsx", "xls"],
-        key="prosp_file",
-        help="Tableau Excel avec colonnes : Raison sociale, Type de structure, estimation Conso, prise de contact…",
-    )
-
-    # Persistance du fichier prospection (même logique que courbes de charge)
-    _prosp_store = _get_file_store().setdefault("prosp", {})
-    if _prosp_file:
-        _prosp_store[_prosp_file.name] = _prosp_file.getvalue()
-    _prosp_bytes = next(iter(_prosp_store.values()), None) if _prosp_store else None
+    # Récupération depuis le store (uploader est dans la sidebar)
+    _prosp_bytes = next(iter(_get_file_store().get("prosp", {}).values()), None)
 
     if _prosp_bytes is None:
-        st.info("Chargez votre fichier de prospection pour afficher le tableau de bord.", icon="📂")
+        st.info("Chargez votre fichier de prospection dans la barre latérale (section **5 · Prospection**).", icon="📂")
         st.stop()
 
     # ── Chargement et nettoyage ───────────────────────────────────────────────
